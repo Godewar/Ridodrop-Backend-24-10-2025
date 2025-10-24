@@ -1047,7 +1047,7 @@ exports.collectCash = async (req, res) => {
 // Save drop location data - Following SaveFromAddress pattern
 exports.saveDropLocation = async (req, res) => {
   try {
-    const {
+    let {
       userId,
       selectedAddress,
       selectedLocation,
@@ -1068,6 +1068,16 @@ exports.saveDropLocation = async (req, res) => {
       saveAs,
       userPhoneNumber
     } = req.body;
+
+    // If userId is missing, try to get it from authenticated user (req.user)
+    if (!userId && req.user && req.user.userId) {
+      userId = req.user.userId;
+      console.log('Auto-filled userId from req.user:', userId);
+    }
+
+    if (!userId) {
+      return res.status(400).json({ message: 'userId is required' });
+    }
 
     console.log(req.body, 'SaveDropLocation data');
 
