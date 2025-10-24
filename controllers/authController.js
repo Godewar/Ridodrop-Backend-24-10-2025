@@ -438,13 +438,12 @@ exports.sendmobileOTP = async (req, res) => {
     )}&instance_id=${instanceId}&access_token=${accessToken}`;
 
     const response = await axios.get(apiUrl);
-
-    return res.status(200).json({ message: 'OTP sent via WhatsApp' });
-    if (response.data.status === 'success') {
-      console.log('succc');
+    if (response.data && (response.data.status === 'success' || response.data.success)) {
+      console.log('OTP sent successfully:', response.data);
+      return res.status(200).json({ message: 'OTP sent via WhatsApp' });
     } else {
       console.error('SMTP Guru API Error:', response.data);
-      return res.status(500).json({ message: 'Failed to send OTP' });
+      return res.status(500).json({ message: 'Failed to send OTP', details: response.data });
     }
   } catch (err) {
     console.error('Send OTP Error:', err);
