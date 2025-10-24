@@ -198,13 +198,13 @@ exports.getBooking = async (req, res) => {
 //     if (!booking) return res.status(404).json({ message: "Booking not found" });
 //     if (req.user.role === "rider") {
 //       // Rider can accept or update status
-//       if (!booking.rider) booking.rider = req.user.userId;
+//       if (!booking.rider) booking.rider = req.user._id;
 //       if (req.body.status) booking.status = req.body.status;
 //       await booking.save();
 //       return res.json(booking);
 //     } else if (
 //       req.user.role === "customer" &&
-//       booking.customer.toString() === req.user.userId
+//       booking.customer.toString() === req.user._id
 //     ) {
 //       // Customer can cancel
 //       if (req.body.status === "cancelled") {
@@ -222,8 +222,8 @@ exports.getBooking = async (req, res) => {
 // exports.listBookings = async (req, res) => {
 //   try {
 //     let filter = {};
-//     if (req.user.role === "customer") filter.customer = req.user.userId;
-//     if (req.user.role === "rider") filter.rider = req.user.userId;
+//     if (req.user.role === "customer") filter.customer = req.user._id;
+//     if (req.user.role === "rider") filter.rider = req.user._id;
 //     const bookings = await Booking.find(filter).populate(
 //       "customer rider",
 //       "name email phone"
@@ -1070,8 +1070,8 @@ exports.saveDropLocation = async (req, res) => {
     } = req.body;
 
     // If userId is missing, try to get it from authenticated user (req.user)
-    if (!userId && req.user && req.user.userId) {
-      userId = req.user.userId;
+    if (!userId && req.user && req.user._id) {
+      userId = req.user._id;
       console.log('Auto-filled userId from req.user:', userId);
     }
 
