@@ -422,10 +422,10 @@ exports.sendmobileOTP = async (req, res) => {
   try {
     // SMTP Guru API configuration
 
-    // const instanceId = '67F4BD1328D8B'; office
-    // const accessToken = '66cf2b3d6b249';
-    const instanceId = "685BD4B561551"; 
-    const accessToken = "685bd213dadf7";
+    const instanceId = '67F4BD1328D8B';
+    const accessToken = '66cf2b3d6b249';
+    // const instanceId = "685BD4B561551";  Ridodrop
+    // const accessToken = "685bd213dadf7";
     // const instanceId = "67FA189D6AE5D";  E-bay
     // const accessToken = "67fa147ed20cf";
     const message = `Welcome To Ridodrop! Your verification OTP is: ${otp}. Please do not share this OTP with anyone.`;
