@@ -22,6 +22,11 @@ app.use(
         return callback(null, true);
       }
 
+      // Allow Vercel dashboard frontend
+      if (origin === 'https://ridodrop-dashboard.vercel.app') {
+        return callback(null, true);
+      }
+
       callback(new Error('Not allowed by CORS'));
     },
     credentials: true,
