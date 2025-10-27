@@ -14,20 +14,20 @@ app.use('/uploads', express.static('uploads'));
 app.use(
   cors({
     origin: function (origin, callback) {
-      // Allow requests with no origin (like mobile apps or curl requests)
+      // Allow requests with no origin (mobile apps, curl, Postman)
       if (!origin) return callback(null, true);
 
-      // Allow any localhost port or 127.0.0.1 port
-      if (origin.match(/^https?:\/\/(localhost|127\.0\.0\.1):\d+$/)) {
+      // Allow localhost, dashboard, and any web client
+      if (
+        origin.match(/^https?:\/\/(localhost|127\.0\.0\.1):\d+$/) ||
+        origin === 'https://ridodrop-dashboard.vercel.app' ||
+        origin.match(/^https?:\/\/.+/)
+      ) {
         return callback(null, true);
       }
 
-      // Allow Vercel dashboard frontend
-      if (origin === 'https://ridodrop-dashboard.vercel.app') {
-        return callback(null, true);
-      }
-
-      callback(new Error('Not allowed by CORS'));
+      // Allow all origins (for mobile/web clients)
+      return callback(null, true);
     },
     credentials: true,
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
