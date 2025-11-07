@@ -94,6 +94,7 @@ app.use('/api/v1/prices', require('./routes/prices'));
 app.use('/api/v1/services', require('./routes/services'));
 app.use('/api/v1/coupons', require('./routes/coupons'));
 app.use('/api/v1/vehicles', require('./routes/vehicles'));
+app.use('/api/v1/referrals', require('./routes/referral'));
 
 // ...existing code...
 

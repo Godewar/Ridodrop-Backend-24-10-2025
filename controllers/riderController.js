@@ -45,7 +45,6 @@
 //       }
 //     );
 
-
 //     res.status(201).json(rider, token);
 //   } catch (err) {
 //     console.log(err);
@@ -56,7 +55,6 @@
 // exports.updateRider = async (req, res) => {
 //   try {
 //     const { phone } = req.body;
-
 
 //     if (!phone) {
 //       return res
@@ -141,8 +139,8 @@
 // //   }
 // // };
 
-const Rider = require("../models/RiderSchema");
-const jwt = require("jsonwebtoken");
+const Rider = require('../models/RiderSchema');
+const jwt = require('jsonwebtoken');
 
 // ...existing code...
 
@@ -151,42 +149,34 @@ exports.createRider = async (req, res) => {
     const { phone } = req.body;
 
     if (!phone) {
-      return res.status(400).json({ error: "Phone number is required" });
+      return res.status(400).json({ error: 'Phone number is required' });
     }
 
     // Use findOne for a single document
     const existingRider = await Rider.findOne({ phone: phone });
     if (existingRider) {
-      return res
-        .status(400)
-        .json({ error: "Rider with this phone number already exists" });
+      return res.status(400).json({ error: 'Rider with this phone number already exists' });
     }
 
     // Build images object from uploaded files
     const images = {};
-    ["BackaadharCard", "FrontaadharCard", "profilePhoto", "panCard"].forEach(
-      (field) => {
-        if (req.files && req.files[field]) {
-          images[field] = req.files[field][0].path.replace(/\\/g, "/"); // Normalize path for consistency
-        }
+    ['BackaadharCard', 'FrontaadharCard', 'profilePhoto', 'panCard'].forEach((field) => {
+      if (req.files && req.files[field]) {
+        images[field] = req.files[field][0].path.replace(/\\/g, '/'); // Normalize path for consistency
       }
-    );
+    });
 
     const riderData = {
       ...req.body,
-      images,
+      images
     };
 
     const rider = new Rider(riderData);
     await rider.save();
 
-    const token = jwt.sign(
-      { phone, userId: rider._id },
-      process.env.JWT_SECRET,
-      {
-        expiresIn: "30d", // Token valid for 30 days
-      }
-    );
+    const token = jwt.sign({ phone, userId: rider._id }, process.env.JWT_SECRET, {
+      expiresIn: '30d' // Token valid for 30 days
+    });
 
     res.status(201).json({ rider, token });
   } catch (err) {
@@ -200,15 +190,13 @@ exports.updateRider = async (req, res) => {
     const { phone } = req.body;
 
     if (!phone) {
-      return res
-        .status(400)
-        .json({ error: "Phone number is required for update" });
+      return res.status(400).json({ error: 'Phone number is required for update' });
     }
 
     // Get existing rider to preserve current images
     const existingRider = await Rider.findOne({ phone });
     if (!existingRider) {
-      return res.status(404).json({ error: "Rider not found" });
+      return res.status(404).json({ error: 'Rider not found' });
     }
 
     // Prepare update object
@@ -218,44 +206,40 @@ exports.updateRider = async (req, res) => {
     if (req.files && Object.keys(req.files).length > 0) {
       // Start with existing images
       updateData.images = existingRider.images || {};
-      
+
       // Update only the new images that were uploaded
       [
-        "vehicleimageFront",
-        "vehicleimageBack", 
-        "vehicleRcFront",
-        "vehicleRcBack",
-        "vehicleInsurence",
-        "drivingLicenseFront",
-        "drivingLicenseBack",
+        'vehicleimageFront',
+        'vehicleimageBack',
+        'vehicleRcFront',
+        'vehicleRcBack',
+        'vehicleInsurence',
+        'drivingLicenseFront',
+        'drivingLicenseBack'
       ].forEach((field) => {
         if (req.files[field]) {
-          updateData.images[field] = req.files[field][0].path.replace(/\\/g, "/");
+          updateData.images[field] = req.files[field][0].path.replace(/\\/g, '/');
         }
       });
     }
 
     // Update rider using phone number
-    const rider = await Rider.findOneAndUpdate(
-      { phone },
-      { $set: updateData },
-      { new: true, runValidators: true }
-    );
+    const rider = await Rider.findOneAndUpdate({ phone }, { $set: updateData }, { new: true, runValidators: true });
 
-    console.log("Rider updated successfully:", {
+    console.log('Rider updated successfully:', {
       phone: rider.phone,
       vehicleType: rider.vehicleType,
       vehicleregisterNumber: rider.vehicleregisterNumber,
       imagesUploaded: Object.keys(rider.images || {})
     });
 
-    res.json({ 
-      message: "Rider updated successfully", 
+    res.json({
+      message: 'Rider updated successfully',
       rider: rider,
-      success: true 
+      success: true
     });
   } catch (err) {
-    console.error("Error updating rider:", err);
+    console.error('Error updating rider:', err);
     res.status(400).json({ error: err.message });
   }
 };
@@ -270,7 +254,7 @@ exports.getRiderById = async (req, res) => {
 
     const rider = await Rider.findOne({ phone: number });
 
-    if (!rider) return res.status(404).json({ error: "Rider not found" });
+    if (!rider) return res.status(404).json({ error: 'Rider not found' });
     res.json(rider);
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -293,32 +277,22 @@ exports.getRiderById = async (req, res) => {
 // Get all riders
 exports.getAllRiders = async (req, res) => {
   try {
-    const {
-      page = 1,
-      limit = 50,
-      search,
-      vehicleType,
-      vehicleSubType,
-      isBlocked,
-      city,
-      truckSize,
-      fuelType
-    } = req.query;
+    const { page = 1, limit = 50, search, vehicleType, vehicleSubType, isBlocked, city, truckSize, fuelType } = req.query;
 
     console.log('📥 getAllRiders - Query params:', { vehicleType, vehicleSubType, fuelType, truckSize, city, isBlocked });
 
     // Build filter object
     const filter = {};
-    
+
     if (isBlocked !== undefined) filter.isBlocked = isBlocked === 'true';
     if (vehicleType) filter.vehicleType = vehicleType;
     if (vehicleSubType) filter.vehicleSubType = vehicleSubType;
     if (city) filter.selectCity = { $regex: city, $options: 'i' };
     if (truckSize) filter.truckSize = truckSize;
     if (fuelType) filter.fueltype = { $regex: fuelType, $options: 'i' };
-    
+
     console.log('🔍 Filter object:', filter);
-    
+
     // Search filter
     if (search) {
       filter.$or = [
@@ -333,11 +307,7 @@ exports.getAllRiders = async (req, res) => {
     const skip = (parseInt(page) - 1) * parseInt(limit);
 
     // Execute query
-    const riders = await Rider.find(filter)
-      .sort({ createdAt: -1 })
-      .skip(skip)
-      .limit(parseInt(limit))
-      .lean();
+    const riders = await Rider.find(filter).sort({ createdAt: -1 }).skip(skip).limit(parseInt(limit)).lean();
 
     console.log('📦 Found', riders.length, 'riders');
     if (riders.length > 0) {
@@ -375,18 +345,126 @@ exports.getAllRiders = async (req, res) => {
       }
     });
   } catch (err) {
-    console.error("Get all riders error:", err);
+    console.error('Get all riders error:', err);
     res.status(500).json({ error: err.message });
   }
 };
 
-// // Delete a rider by ID
-// exports.deleteRider = async (req, res) => {
-//   try {
-//     const rider = await Rider.findByIdAndDelete(req.params.id);
-//     if (!rider) return res.status(404).json({ error: "Rider not found" });
-//     res.json({ message: "Rider deleted" });
-//   } catch (err) {
-//     res.status(500).json({ error: err.message });
-//   }
-// };
+// Block a rider by ID
+exports.blockRider = async (req, res) => {
+  try {
+    const { id } = req.params;
+    let rider;
+
+    console.log('🚫 Blocking rider with ID:', id);
+
+    // Check if ID looks like a MongoDB ObjectId (24 hex characters)
+    if (id.match(/^[0-9a-fA-F]{24}$/)) {
+      rider = await Rider.findByIdAndUpdate(id, { isBlocked: 'true' }, { new: true });
+    } else {
+      // Assume it's a phone number
+      rider = await Rider.findOneAndUpdate({ phone: id }, { isBlocked: 'true' }, { new: true });
+    }
+
+    if (!rider) {
+      console.log('❌ Rider not found');
+      return res.status(404).json({
+        success: false,
+        message: 'Rider not found'
+      });
+    }
+
+    console.log('✅ Rider blocked successfully:', rider.phone);
+    res.status(200).json({
+      success: true,
+      message: 'Rider blocked successfully',
+      data: rider
+    });
+  } catch (error) {
+    console.error('❌ Error in blockRider:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error blocking rider',
+      error: error.message
+    });
+  }
+};
+
+// Unblock a rider by ID
+exports.unblockRider = async (req, res) => {
+  try {
+    const { id } = req.params;
+    let rider;
+
+    console.log('✅ Unblocking rider with ID:', id);
+
+    // Check if ID looks like a MongoDB ObjectId (24 hex characters)
+    if (id.match(/^[0-9a-fA-F]{24}$/)) {
+      rider = await Rider.findByIdAndUpdate(id, { isBlocked: 'false' }, { new: true });
+    } else {
+      // Assume it's a phone number
+      rider = await Rider.findOneAndUpdate({ phone: id }, { isBlocked: 'false' }, { new: true });
+    }
+
+    if (!rider) {
+      console.log('❌ Rider not found');
+      return res.status(404).json({
+        success: false,
+        message: 'Rider not found'
+      });
+    }
+
+    console.log('✅ Rider unblocked successfully:', rider.phone);
+    res.status(200).json({
+      success: true,
+      message: 'Rider unblocked successfully',
+      data: rider
+    });
+  } catch (error) {
+    console.error('❌ Error in unblockRider:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error unblocking rider',
+      error: error.message
+    });
+  }
+};
+
+// Delete a rider by ID
+exports.deleteRider = async (req, res) => {
+  try {
+    const { id } = req.params;
+    let rider;
+
+    console.log('🗑️ Deleting rider with ID:', id);
+
+    // Check if ID looks like a MongoDB ObjectId (24 hex characters)
+    if (id.match(/^[0-9a-fA-F]{24}$/)) {
+      rider = await Rider.findByIdAndDelete(id);
+    } else {
+      // Assume it's a phone number
+      rider = await Rider.findOneAndDelete({ phone: id });
+    }
+
+    if (!rider) {
+      console.log('❌ Rider not found');
+      return res.status(404).json({
+        success: false,
+        message: 'Rider not found'
+      });
+    }
+
+    console.log('✅ Rider deleted successfully:', rider.phone);
+    res.status(200).json({
+      success: true,
+      message: 'Rider deleted successfully'
+    });
+  } catch (error) {
+    console.error('❌ Error in deleteRider:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error deleting rider',
+      error: error.message
+    });
+  }
+};
