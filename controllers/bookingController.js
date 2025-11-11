@@ -620,8 +620,12 @@ exports.assignOrder = async (req, res) => {
     }
     await booking.save();
 
+    // Populate the booking with full customer and driver details
+    await booking.populate('customer rider');
+
     res.json({
       message: 'Order assigned to driver',
+      booking: booking, // Return full booking object
       orderDetails: {
         from: booking.fromAddress,
         to: booking.dropLocation
@@ -682,23 +686,122 @@ exports.getAvailableBookingsForDriver = async (req, res) => {
     }
     const driverVehicleType = rider.vehicleType;
 
-    console.log('Driver vehicle type:', driverVehicleType);
+    console.log('🚗 Driver vehicle type (raw):', driverVehicleType);
+
+    // Normalize vehicle type to match Booking schema enum ['2W', '3W', 'Truck']
+    const normalizeVehicleType = (type) => {
+      if (!type) return null;
+      const typeStr = type.toString().toLowerCase();
+
+      // Map various formats to standard values
+      if (typeStr.includes('2w') || typeStr === '2wheeler' || typeStr === 'bike' || typeStr === 'motorcycle') {
+        return '2W';
+      }
+      if (typeStr.includes('3w') || typeStr === '3wheeler' || typeStr === 'auto' || typeStr === 'rickshaw') {
+        return '3W';
+      }
+      if (typeStr.includes('truck') || typeStr === '4w' || typeStr === 'pickup') {
+        return 'Truck';
+      }
+
+      // If already in correct format, return as is
+      if (type === '2W' || type === '3W' || type === 'Truck') {
+        return type;
+      }
+
+      return null;
+    };
+
+    const normalizedVehicleType = normalizeVehicleType(driverVehicleType);
+
+    if (!normalizedVehicleType) {
+      console.log('❌ Could not normalize vehicle type:', driverVehicleType);
+      return res.status(400).json({
+        success: false,
+        message: `Invalid vehicle type: ${driverVehicleType}. Expected: 2W, 3W, or Truck`,
+        bookings: []
+      });
+    }
+
+    console.log('🚗 Driver vehicle type (normalized):', normalizedVehicleType);
 
     // Find bookings that are not yet assigned to a rider, are ongoing/pending, and match vehicle type
-    const bookings = await Booking.find({
-      rider: { $exists: false },
-      vehicleType: driverVehicleType, // Filter by vehicle type
-      $or: [{ status: 'pending' }, { bookingStatus: 'Ongoing' }],
-      status: { $ne: 'completed' },
-      bookingStatus: { $ne: 'Completed' }
-    });
+    const query = {
+      $or: [{ rider: { $exists: false } }, { rider: null }, { rider: '' }],
+      vehicleType: normalizedVehicleType, // Use normalized vehicle type
+      $and: [
+        {
+          $or: [{ status: 'pending' }, { status: 'in_progress' }, { bookingStatus: 'Ongoing' }, { bookingStatus: 'pending' }]
+        }
+      ],
+      status: { $nin: ['completed', 'cancelled'] },
+      bookingStatus: { $nin: ['Completed', 'completed', 'Cancelled', 'cancelled'] }
+    };
 
-    console.log(`Found ${bookings.length} bookings matching criteria`);
+    console.log('🔍 Query:', JSON.stringify(query, null, 2));
+
+    const bookings = await Booking.find(query);
+
+    console.log(`✅ Found ${bookings.length} bookings matching criteria`);
+
+    if (bookings.length > 0) {
+      console.log('📋 Sample booking details:', {
+        id: bookings[0]._id,
+        status: bookings[0].status,
+        bookingStatus: bookings[0].bookingStatus,
+        vehicleType: bookings[0].vehicleType,
+        rider: bookings[0].rider,
+        hasFromAddress: !!bookings[0].fromAddress,
+        hasDropLocation: bookings[0].dropLocation?.length > 0
+      });
+    } else {
+      console.log('⚠️ No bookings found - checking total bookings in DB...');
+      const totalBookings = await Booking.countDocuments({});
+      const totalByVehicle = await Booking.countDocuments({ vehicleType: normalizedVehicleType });
+      const totalPending = await Booking.countDocuments({ status: 'pending' });
+
+      // Also check what vehicle types exist in the database
+      const existingVehicleTypes = await Booking.distinct('vehicleType');
+
+      console.log('📊 Database stats:', {
+        totalBookings,
+        totalByVehicle,
+        totalPending,
+        driverVehicleType: driverVehicleType,
+        normalizedVehicleType: normalizedVehicleType,
+        existingVehicleTypes: existingVehicleTypes
+      });
+    }
 
     const result = bookings
-      .map((booking) => {
-        if (!booking.fromAddress || !booking.dropLocation.length) return null;
+      .map((booking, index) => {
+        // Log each booking for debugging
+        console.log(`🔍 Processing booking ${index + 1}/${bookings.length}:`, {
+          id: booking._id,
+          hasFromAddress: !!booking.fromAddress,
+          hasDropLocation: booking.dropLocation?.length > 0,
+          fromAddress: booking.fromAddress,
+          dropLocation: booking.dropLocation
+        });
+
+        // Check if booking has required address data
+        if (!booking.fromAddress) {
+          console.log(`⚠️ Booking ${booking._id} skipped - missing fromAddress`);
+          return null;
+        }
+
+        if (!booking.dropLocation || booking.dropLocation.length === 0) {
+          console.log(`⚠️ Booking ${booking._id} skipped - missing dropLocation`);
+          return null;
+        }
+
         const drop = booking.dropLocation[0];
+
+        // Validate coordinates
+        if (!booking.fromAddress.latitude || !booking.fromAddress.longitude) {
+          console.log(`⚠️ Booking ${booking._id} skipped - invalid fromAddress coordinates`);
+          return null;
+        }
 
         // Calculate driver to pickup distance
         const driverToFromKm = getDistanceFromLatLonInKm(latitude, longitude, booking.fromAddress.latitude, booking.fromAddress.longitude);
@@ -717,6 +820,8 @@ exports.getAvailableBookingsForDriver = async (req, res) => {
         // Only show orders within reasonable distance (optional filter)
         // if (driverToFromKm > 10) return null;
 
+        console.log(`✅ Booking ${booking._id} included in results`);
+
         return {
           bookingId: booking._id,
           from: booking.fromAddress,
@@ -729,18 +834,20 @@ exports.getAvailableBookingsForDriver = async (req, res) => {
       })
       .filter(Boolean);
 
-    console.log(`Returning ${result.length} orders to driver`);
-
-    // res.json({
-    //   message: 'Available bookings for driver',
-    //   bookings: result
-    // });
+    console.log(`📊 Filtering results: ${bookings.length} total → ${result.length} valid bookings`);
 
     console.log(`SUCCESS: Returning ${result.length} valid bookings`);
     res.json({
       success: true,
       message: result.length > 0 ? 'Available bookings for driver' : 'No bookings available',
-      bookings: result
+      bookings: result,
+      debug: {
+        totalFound: bookings.length,
+        validBookings: result.length,
+        filteredOut: bookings.length - result.length,
+        driverVehicleTypeRaw: driverVehicleType,
+        driverVehicleTypeNormalized: normalizedVehicleType
+      }
     });
   } catch (err) {
     console.error('Error in getAvailableBookingsForDriver:', err);
