@@ -636,110 +636,50 @@ exports.assignOrder = async (req, res) => {
   }
 };
 
-// exports.getAvailableBookingsForDriver = async (req, res) => {
-//   try {
-//     const { latitude, longitude, number } = req.body; // driver's current location and phone number
-
-//     console.log(latitude, longitude, number, "in availanle booking")
-//     if (latitude == null || longitude == null || !number) {
-//       return res
-//         .status(400)
-//         .json({ message: "Driver latitude, longitude, and phone number required" });
-//     }
-
-//     // Fetch the driver's vehicle type
-//     const rider = await Rider.findOne({ phone: number });
-
-//     // console.log(rider, "wswsw")
-//     if (!rider || !rider.vehicleType) {
-//       return res.status(404).json({ message: "Rider or vehicle type not found" });
-//     }
-//     const driverVehicleType = rider.vehicleType;
-
-//     console.log(driverVehicleType)
-//     // Find bookings that are not yet assigned to a rider, are ongoing/pending, and match vehicle type
-//     const bookings = await Booking.find({
-//       rider: { $exists: false },
-//       vehicleType: driverVehicleType, // Filter by vehicle type
-//       $or: [
-//         { status: "pending" },
-//         { bookingStatus: "Ongoing" }
-//       ],
-//       status: { $ne: "completed" },
-//       bookingStatus: { $ne: "Completed" }
-//     });
-
-//     const result = bookings
-//       .map((booking) => {
-//         if (!booking.fromAddress || !booking.dropLocation.length) return null;
-//         const drop = booking.dropLocation[0];
-
-//         // Calculate driver to pickup distance
-//         const driverToFromKm = getDistanceFromLatLonInKm(
-//           latitude,
-//           longitude,
-//           booking.fromAddress.latitude,
-//           booking.fromAddress.longitude
-//         );
-
-//         // Calculate pickup to drop distance only if drop has lat/lng
-//         let fromToDropKm = 0;
-//         if (
-//           drop &&
-//           typeof drop.latitude === "number" &&
-//           typeof drop.longitude === "number"
-//         ) {
-//           fromToDropKm = getDistanceFromLatLonInKm(
-//             booking.fromAddress.latitude,
-//             booking.fromAddress.longitude,
-//             drop.latitude,
-//             drop.longitude
-//           );
-//         }
-
-//         // const price = (driverToFromKm + fromToDropKm) * 10;
-
-//         // if (driverToFromKm > 10) return null;
-
-//         return {
-//           bookingId: booking._id,
-//           from: booking.fromAddress,
-//           to: drop,
-//           driverToFromKm: driverToFromKm.toFixed(2),
-//           fromToDropKm: fromToDropKm.toFixed(2),
-//           price: booking.amountPay,
-//           status: booking.status || booking.bookingStatus,
-//         };
-//       })
-//       .filter(Boolean);
-
-//     console.log(result, "Resul all booking ")
-//     res.json({
-//       message: "Available bookings for driver within 5km",
-//       bookings: result,
-//     });
-//   } catch (err) {
-//     res.status(500).json({ message: err.message });
-//   }
-// };
-
 exports.getAvailableBookingsForDriver = async (req, res) => {
   try {
-    const { latitude, longitude, number } = req.body; // driver's phone number
+    const { latitude, longitude, number } = req.body;
 
-    console.log(latitude, longitude, number, 'in available booking');
+    console.log('?? getAvailableBookingsForDriver called');
+    console.log('?? Request:', { latitude, longitude, number });
+
+    // if (latitude == null || longitude == null || !number) {
+    //   return res.status(400).json({ message: 'Driver latitude, longitude, and phone number required' });
+    // }
 
     if (latitude == null || longitude == null || !number) {
-      return res.status(400).json({ message: 'Driver latitude, longitude, and phone number required' });
+      console.log('ERROR: Missing required parameters');
+      return res.status(400).json({
+        success: false,
+        message: 'Driver latitude, longitude, and phone number required',
+        bookings: []
+      });
     }
 
     // Fetch the driver's vehicle type
     const rider = await Rider.findOne({ phone: number });
 
-    if (!rider || !rider.vehicleType) {
-      return res.status(404).json({ message: 'Rider or vehicle type not found' });
+    // if (!rider || !rider.vehicleType) {
+    //   return res.status(404).json({ message: 'Rider or vehicle type not found' });
+    // }
+
+    if (!rider) {
+      console.log('ERROR: Rider not found');
+      return res.status(404).json({
+        success: false,
+        message: 'Rider not found. Please complete registration.',
+        bookings: []
+      });
     }
 
+    if (!rider.vehicleType) {
+      console.log('ERROR: Vehicle type not set');
+      return res.status(404).json({
+        success: false,
+        message: 'Vehicle type not set. Please complete vehicle registration.',
+        bookings: []
+      });
+    }
     const driverVehicleType = rider.vehicleType;
 
     console.log('Driver vehicle type:', driverVehicleType);
@@ -791,13 +731,26 @@ exports.getAvailableBookingsForDriver = async (req, res) => {
 
     console.log(`Returning ${result.length} orders to driver`);
 
+    // res.json({
+    //   message: 'Available bookings for driver',
+    //   bookings: result
+    // });
+
+    console.log(`SUCCESS: Returning ${result.length} valid bookings`);
     res.json({
-      message: 'Available bookings for driver',
+      success: true,
+      message: result.length > 0 ? 'Available bookings for driver' : 'No bookings available',
       bookings: result
     });
   } catch (err) {
     console.error('Error in getAvailableBookingsForDriver:', err);
-    res.status(500).json({ message: err.message });
+    // res.status(500).json({ message: err.message });
+
+    res.status(500).json({
+      success: false,
+      message: err.message,
+      bookings: []
+    });
   }
 };
 
