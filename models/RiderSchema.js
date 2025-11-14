@@ -46,6 +46,7 @@ const mongoose = require('mongoose');
 
 const RiderSchema = new mongoose.Schema(
   {
+    riderId: { type: String, unique: true, sparse: true },
     name: { type: String },
     phone: { type: String, required: true, unique: true },
 
@@ -67,6 +68,13 @@ const RiderSchema = new mongoose.Schema(
     walletBalance: { type: Number, default: 0 },
     isBlocked: { type: String, default: 'false' },
     status: { type: String, default: 'active', enum: ['active', 'inactive', 'blocked', 'pending', 'approved'] },
+    isOnline: { type: Boolean, default: false },
+    lastLocationUpdate: { type: Date },
+    lastSeen: { type: Date },
+    currentLocation: {
+      type: { type: String, enum: ['Point'], default: 'Point' },
+      coordinates: { type: [Number], default: [0, 0] }
+    },
     ispaidFees: { type: String, default: 'false' },
     step: { type: String, default: '1' },
     selectCity: { type: String },
@@ -86,5 +94,23 @@ const RiderSchema = new mongoose.Schema(
   },
   { timestamps: true }
 );
+
+// Pre-save hook to generate riderId
+RiderSchema.pre('save', async function (next) {
+  if (!this.riderId && this.isNew) {
+    try {
+      // Count existing riders to generate sequential ID
+      const count = await this.constructor.countDocuments();
+      this.riderId = `RDR${String(count + 1).padStart(4, '0')}`;
+      console.log('✅ Generated riderId:', this.riderId);
+    } catch (error) {
+      console.error('❌ Error generating riderId:', error);
+    }
+  }
+  next();
+});
+
+// Create geospatial index for location-based queries
+RiderSchema.index({ currentLocation: '2dsphere' });
 
 module.exports = mongoose.model('RaiderSchema', RiderSchema);

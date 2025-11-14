@@ -58,7 +58,14 @@ const bookingSchema = new mongoose.Schema(
         pincode: { type: String },
         receiverName: { type: String },
         receiverNumber: { type: String },
+        receiverMobile: { type: String }, // Alternative field name
+        ReciversName: { type: String }, // Legacy field name for compatibility
+        ReciversMobileNum: { type: String }, // Legacy field name for compatibility
+        ReceiverName: { type: String }, // Alternative casing
+        ReceiverMobile: { type: String }, // Alternative casing
+        ReceiverPhone: { type: String }, // Alternative field name
         professional: { type: String },
+        tag: { type: String }, // Alternative field name
         latitude: { type: Number, required: true },
         longitude: { type: Number, required: true }
       }

@@ -31,6 +31,9 @@ router.put(
 router.get('/get/rider', riderController.getRiderById);
 router.get('/all/riders', riderController.getAllRiders);
 
+// Update online status and location
+router.post('/update-online-status', riderController.updateOnlineStatus);
+
 // Block and Unblock routes
 router.patch('/:id/block', riderController.blockRider);
 router.patch('/:id/unblock', riderController.unblockRider);

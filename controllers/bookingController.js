@@ -1,3 +1,4 @@
+const mongoose = require('mongoose');
 const Booking = require('../models/Booking');
 const Rider = require('../models/RiderSchema');
 const User = require('../models/User');
@@ -35,35 +36,99 @@ exports.getAllOrders = async (req, res) => {
 
     // Get bookings with populated user data
     const bookings = await Booking.find(filter)
-      .populate('userId', 'name lname phone email customerId profilePhoto')
-      .populate('rider', 'name lname phone')
+      .populate('driver', 'riderId name phone vehicleType') // Use driver field instead of rider
       .sort({ createdAt: -1 })
       .skip(skip)
       .limit(parseInt(limit));
 
+    console.log(
+      '📦 Sample booking from DB:',
+      bookings[0]
+        ? {
+            userId: bookings[0].userId,
+            rider: bookings[0].rider,
+            driver: bookings[0].driver
+          }
+        : 'No bookings'
+    );
+
     // Get total count for pagination
     const total = await Booking.countDocuments(filter);
 
-    // Transform data to include customer information
-    const transformedBookings = bookings.map((booking) => {
-      const user = booking.userId;
-      return {
-        ...booking.toObject(),
-        customer: user
-          ? {
-              _id: user._id,
-              customerId: user.customerId || user._id,
-              name: user.name && user.lname ? `${user.name} ${user.lname}` : user.name || user.lname || 'Unknown',
-              firstName: user.name,
-              lastName: user.lname,
-              mobile: user.phone,
-              phone: user.phone,
-              email: user.email,
-              profilePhoto: user.profilePhoto
-            }
-          : null
-      };
-    });
+    // Manually fetch user and rider data since userId and rider are stored as strings
+    const transformedBookings = await Promise.all(
+      bookings.map(async (booking) => {
+        let user = null;
+        let riderData = null;
+
+        // Fetch user data manually using the string userId
+        if (booking.userId) {
+          try {
+            // Try to find by customerId or phone or _id
+            user = await User.findOne({
+              $or: [
+                { customerId: booking.userId },
+                { phone: booking.userId },
+                { _id: mongoose.Types.ObjectId.isValid(booking.userId) ? booking.userId : null }
+              ]
+            }).select('name lname phone email customerId profilePhoto');
+
+            console.log('👤 Found user:', user ? user.name : 'Not found');
+          } catch (err) {
+            console.log('❌ Error fetching user:', err.message);
+          }
+        }
+
+        // Fetch rider data - try both driver (ObjectId) and rider (String) fields
+        if (booking.driver) {
+          // driver is already populated
+          riderData = booking.driver;
+          console.log('🚗 Using populated driver:', riderData?.name);
+        } else if (booking.rider) {
+          // Manually fetch rider using string
+          try {
+            riderData = await Rider.findOne({
+              $or: [
+                { phone: booking.rider },
+                { riderId: booking.rider },
+                { _id: mongoose.Types.ObjectId.isValid(booking.rider) ? booking.rider : null }
+              ]
+            }).select('riderId name phone vehicleType');
+
+            console.log('🚗 Found rider:', riderData ? riderData.name : 'Not found');
+          } catch (err) {
+            console.log('❌ Error fetching rider:', err.message);
+          }
+        }
+
+        return {
+          ...booking.toObject(),
+          customer: user
+            ? {
+                _id: user._id,
+                customerId: user.customerId || user._id,
+                name: user.name && user.lname ? `${user.name} ${user.lname}` : user.name || user.lname || 'Unknown',
+                firstName: user.name,
+                lastName: user.lname,
+                mobile: user.phone,
+                phone: user.phone,
+                email: user.email,
+                profilePhoto: user.profilePhoto
+              }
+            : null,
+          rider: riderData
+            ? {
+                _id: riderData._id,
+                riderId: riderData.riderId || riderData._id,
+                name: riderData.name || 'Unknown Driver',
+                phone: riderData.phone,
+                mobile: riderData.phone,
+                vehicleType: riderData.vehicleType
+              }
+            : null
+        };
+      })
+    );
 
     res.status(200).json({
       success: true,
@@ -151,6 +216,30 @@ exports.createBooking = async (req, res) => {
       }));
     }
 
+    // Calculate distance from pickup to drop location
+    let distanceKm = null;
+    if (fromAddress?.latitude && fromAddress?.longitude && processedDropLocation[0]?.latitude && processedDropLocation[0]?.longitude) {
+      const getDistanceFromLatLonInKm = (lat1, lon1, lat2, lon2) => {
+        const R = 6371; // Radius of earth in km
+        const dLat = ((lat2 - lat1) * Math.PI) / 180;
+        const dLon = ((lon2 - lon1) * Math.PI) / 180;
+        const a =
+          Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+          Math.cos((lat1 * Math.PI) / 180) * Math.cos((lat2 * Math.PI) / 180) * Math.sin(dLon / 2) * Math.sin(dLon / 2);
+        const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+        return R * c;
+      };
+
+      const calculatedDistance = getDistanceFromLatLonInKm(
+        fromAddress.latitude,
+        fromAddress.longitude,
+        processedDropLocation[0].latitude,
+        processedDropLocation[0].longitude
+      );
+      distanceKm = calculatedDistance.toFixed(2);
+      console.log(`📏 Calculated booking distance: ${distanceKm} km`);
+    }
+
     // Build the booking object with exact structure you want
     const bookingData = {
       userId,
@@ -165,7 +254,8 @@ exports.createBooking = async (req, res) => {
       dropLocation: processedDropLocation,
       fromAddress: fromAddress || null,
       currentStep,
-      cashCollected
+      cashCollected,
+      distanceKm: distanceKm || '0'
     };
 
     console.log('Creating booking with data:', bookingData);
@@ -580,63 +670,202 @@ exports.assignOrder = async (req, res) => {
   try {
     const { bookingId, driverId, status } = req.body;
 
+    console.log('🎯 assignOrder called with:', { bookingId, driverId, status });
+
+    // Validate required fields
+    if (!bookingId || !driverId) {
+      console.log('❌ Missing required fields');
+      return res.status(400).json({
+        success: false,
+        message: 'bookingId and driverId are required'
+      });
+    }
+
     // Fetch booking and driver
     const booking = await Booking.findById(bookingId);
     const driver = await Rider.findById(driverId);
 
-    if (!booking || !driver) {
-      return res.status(404).json({ message: 'Booking or Driver not found' });
+    if (!booking) {
+      console.log('❌ Booking not found:', bookingId);
+      return res.status(404).json({
+        success: false,
+        message: 'Booking not found'
+      });
     }
 
-    // // Calculate distances
-    // const driverToFromKm = getDistanceFromLatLonInKm(
-    //   driver.latitude,
-    //   driver.longitude,
-    //   booking.fromAddress.latitude,
-    //   booking.fromAddress.longitude
-    // );
+    if (!driver) {
+      console.log('❌ Driver not found:', driverId);
+      return res.status(404).json({
+        success: false,
+        message: 'Driver not found'
+      });
+    }
 
-    // // Assume first drop location for demo
-    // const drop = booking.dropLocation[0];
-    // const fromToDropKm = getDistanceFromLatLonInKm(
-    //   booking.fromAddress.latitude,
-    //   booking.fromAddress.longitude,
-    //   drop.latitude,
-    //   drop.longitude
-    // );
-
-    // // Example price calculation (customize as needed)
-    // const price = (driverToFromKm + fromToDropKm) * 10; // 10 currency units per km
+    console.log('✅ Found booking and driver');
 
     // Assign driver to booking
     booking.rider = driver._id;
     booking.status = 'accepted';
-    // booking.price = price;
+    booking.bookingStatus = 'Ongoing';
     booking.riderAcceptTime = new Date();
+
     // If the request includes status 'completed', set riderEndTime
     if (req.body.status === 'completed') {
       booking.status = 'completed';
+      booking.bookingStatus = 'Completed';
       booking.riderEndTime = new Date();
     }
-    await booking.save();
 
-    // Populate the booking with full customer and driver details
-    await booking.populate('customer rider');
+    await booking.save();
+    console.log('✅ Booking updated successfully');
+
+    // Manually fetch customer and rider details
+    let customerData = null;
+    if (booking.userId) {
+      try {
+        const customer = await User.findById(booking.userId);
+        if (customer) {
+          customerData = {
+            _id: customer._id,
+            name: customer.name,
+            lname: customer.lname,
+            phone: customer.phone,
+            email: customer.email,
+            profilePhoto: customer.profilePhoto
+          };
+        }
+      } catch (custErr) {
+        console.log('⚠️ Error fetching customer:', custErr.message);
+      }
+    }
+
+    const riderData = {
+      _id: driver._id,
+      name: driver.name,
+      lname: driver.lname,
+      phone: driver.phone,
+      vehicleType: driver.vehicleType
+    };
+
+    // Transform dropLocation to include both old and new field names for compatibility
+    const transformedDropLocation =
+      booking.dropLocation?.map((drop) => ({
+        ...drop,
+        ReciversName: drop.receiverName || drop.ReciversName,
+        ReciversMobileNum: drop.receiverNumber || drop.receiverMobile || drop.ReciversMobileNum,
+        Address: drop.Address || drop.address,
+        Address1: drop.Address1 || drop.address,
+        Address2: drop.Address2,
+        landmark: drop.landmark,
+        pincode: drop.pincode,
+        professional: drop.professional || drop.tag,
+        latitude: drop.latitude,
+        longitude: drop.longitude
+      })) || [];
+
+    // Calculate distances if coordinates are available
+    let driverToFromKm = 0;
+    let fromToDropKm = 0;
+
+    // Helper function to calculate distance (haversine formula)
+    const getDistanceFromLatLonInKm = (lat1, lon1, lat2, lon2) => {
+      const R = 6371; // Radius of earth in km
+      const dLat = ((lat2 - lat1) * Math.PI) / 180;
+      const dLon = ((lon2 - lon1) * Math.PI) / 180;
+      const a =
+        Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+        Math.cos((lat1 * Math.PI) / 180) * Math.cos((lat2 * Math.PI) / 180) * Math.sin(dLon / 2) * Math.sin(dLon / 2);
+      const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+      return R * c;
+    };
+
+    console.log('\n📍 DISTANCE CALCULATION DEBUG:');
+    console.log('From Address:', {
+      latitude: booking.fromAddress?.latitude,
+      longitude: booking.fromAddress?.longitude
+    });
+    console.log('Drop Location:', {
+      latitude: transformedDropLocation[0]?.latitude,
+      longitude: transformedDropLocation[0]?.longitude
+    });
+
+    // Calculate pickup to drop distance
+    if (
+      booking.fromAddress?.latitude &&
+      booking.fromAddress?.longitude &&
+      transformedDropLocation[0]?.latitude &&
+      transformedDropLocation[0]?.longitude
+    ) {
+      fromToDropKm = getDistanceFromLatLonInKm(
+        booking.fromAddress.latitude,
+        booking.fromAddress.longitude,
+        transformedDropLocation[0].latitude,
+        transformedDropLocation[0].longitude
+      );
+      console.log(`✅ Calculated fromToDropKm: ${fromToDropKm.toFixed(2)} km`);
+    } else {
+      console.log('❌ Missing coordinates for fromToDropKm calculation');
+    }
+
+    // Calculate driver to pickup distance if driver location provided
+    if (req.body.latitude && req.body.longitude && booking.fromAddress?.latitude && booking.fromAddress?.longitude) {
+      driverToFromKm = getDistanceFromLatLonInKm(
+        req.body.latitude,
+        req.body.longitude,
+        booking.fromAddress.latitude,
+        booking.fromAddress.longitude
+      );
+      console.log(`✅ Calculated driverToFromKm: ${driverToFromKm.toFixed(2)} km`);
+    } else {
+      console.log('ℹ️ Driver location not provided for driverToFromKm calculation');
+    }
+
+    // Create full booking object with populated data
+    const fullBooking = {
+      ...booking.toObject(),
+      customer: customerData,
+      rider: riderData,
+      dropLocation: transformedDropLocation,
+      price: booking.price || booking.amountPay || 0,
+      driverToFromKm: driverToFromKm > 0 ? driverToFromKm.toFixed(2) : null,
+      fromToDropKm: fromToDropKm > 0 ? fromToDropKm.toFixed(2) : null,
+      // Also add 'from' and 'to' for OrdersScreen compatibility
+      from: {
+        address: booking.fromAddress?.address,
+        latitude: booking.fromAddress?.latitude,
+        longitude: booking.fromAddress?.longitude,
+        house: booking.fromAddress?.house,
+        receiverName: booking.fromAddress?.receiverName,
+        receiverMobile: booking.fromAddress?.receiverMobile,
+        tag: booking.fromAddress?.tag
+      },
+      to: transformedDropLocation[0] || {}
+    };
+
+    console.log('✅ Returning full booking with customer and rider data');
+    console.log('📏 Distance data:', {
+      fromToDropKm: fullBooking.fromToDropKm,
+      driverToFromKm: fullBooking.driverToFromKm
+    });
+    console.log('📦 Drop location data:', transformedDropLocation);
+    console.log('👤 Customer data:', customerData);
 
     res.json({
-      message: 'Order assigned to driver',
-      booking: booking, // Return full booking object
+      success: true,
+      message: 'Order assigned to driver successfully',
+      booking: fullBooking,
       orderDetails: {
         from: booking.fromAddress,
         to: booking.dropLocation
-        // driverToFromKm: driverToFromKm.toFixed(2),
-        // fromToDropKm: fromToDropKm.toFixed(2),
-        // price: price.toFixed(2),
       }
     });
   } catch (err) {
-    console.log(err);
-    res.status(500).json({ message: err.message });
+    console.error('❌ Error in assignOrder:', err);
+    res.status(500).json({
+      success: false,
+      message: 'Internal server error',
+      error: err.message
+    });
   }
 };
 
@@ -817,8 +1046,11 @@ exports.getAvailableBookingsForDriver = async (req, res) => {
           );
         }
 
-        // Only show orders within reasonable distance (optional filter)
-        // if (driverToFromKm > 10) return null;
+        // ✅ FILTER: Only show bookings within 5km of driver's current location
+        if (driverToFromKm > 5) {
+          console.log(`⚠️ Booking ${booking._id} skipped - too far (${driverToFromKm.toFixed(2)}km > 5km)`);
+          return null;
+        }
 
         console.log(`✅ Booking ${booking._id} included in results`);
 
@@ -834,19 +1066,20 @@ exports.getAvailableBookingsForDriver = async (req, res) => {
       })
       .filter(Boolean);
 
-    console.log(`📊 Filtering results: ${bookings.length} total → ${result.length} valid bookings`);
+    console.log(`📊 Filtering results: ${bookings.length} total → ${result.length} valid bookings within 5km`);
 
-    console.log(`SUCCESS: Returning ${result.length} valid bookings`);
+    console.log(`SUCCESS: Returning ${result.length} nearby bookings (within 5km radius)`);
     res.json({
       success: true,
-      message: result.length > 0 ? 'Available bookings for driver' : 'No bookings available',
+      message: result.length > 0 ? `Found ${result.length} booking(s) within 5km` : 'No bookings available within 5km',
       bookings: result,
       debug: {
         totalFound: bookings.length,
         validBookings: result.length,
         filteredOut: bookings.length - result.length,
         driverVehicleTypeRaw: driverVehicleType,
-        driverVehicleTypeNormalized: normalizedVehicleType
+        driverVehicleTypeNormalized: normalizedVehicleType,
+        searchRadius: '5km'
       }
     });
   } catch (err) {
@@ -982,13 +1215,91 @@ exports.getOngoingBookingForRider = async (req, res) => {
       bookingObj.customer = null;
     }
 
+    // Calculate distances if coordinates are available
+    let fromToDropKm = 0;
+
+    // Helper function to calculate distance (haversine formula)
+    const getDistanceFromLatLonInKm = (lat1, lon1, lat2, lon2) => {
+      const R = 6371; // Radius of earth in km
+      const dLat = ((lat2 - lat1) * Math.PI) / 180;
+      const dLon = ((lon2 - lon1) * Math.PI) / 180;
+      const a =
+        Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+        Math.cos((lat1 * Math.PI) / 180) * Math.cos((lat2 * Math.PI) / 180) * Math.sin(dLon / 2) * Math.sin(dLon / 2);
+      const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+      return R * c;
+    };
+
+    console.log('\n📍 ONGOING BOOKING DISTANCE DEBUG:');
+    console.log('From Address:', {
+      latitude: booking.fromAddress?.latitude,
+      longitude: booking.fromAddress?.longitude
+    });
+    console.log('Drop Location:', {
+      latitude: booking.dropLocation?.[0]?.latitude,
+      longitude: booking.dropLocation?.[0]?.longitude
+    });
+
+    // Calculate pickup to drop distance
+    if (
+      booking.fromAddress?.latitude &&
+      booking.fromAddress?.longitude &&
+      booking.dropLocation?.[0]?.latitude &&
+      booking.dropLocation?.[0]?.longitude
+    ) {
+      fromToDropKm = getDistanceFromLatLonInKm(
+        booking.fromAddress.latitude,
+        booking.fromAddress.longitude,
+        booking.dropLocation[0].latitude,
+        booking.dropLocation[0].longitude
+      );
+      console.log(`✅ Calculated fromToDropKm: ${fromToDropKm.toFixed(2)} km`);
+    } else {
+      console.log('❌ Missing coordinates for fromToDropKm calculation');
+    }
+
+    // Add calculated distances and price to booking object
+    bookingObj.fromToDropKm = fromToDropKm > 0 ? fromToDropKm.toFixed(2) : null;
+    bookingObj.price = booking.price || booking.amountPay || 0;
+
+    // Transform dropLocation for compatibility
+    if (bookingObj.dropLocation && bookingObj.dropLocation.length > 0) {
+      bookingObj.dropLocation = bookingObj.dropLocation.map((drop) => ({
+        ...drop,
+        ReciversName: drop.receiverName || drop.ReciversName,
+        ReciversMobileNum: drop.receiverNumber || drop.receiverMobile || drop.ReciversMobileNum,
+        Address: drop.Address || drop.address,
+        Address1: drop.Address1 || drop.address,
+        latitude: drop.latitude,
+        longitude: drop.longitude
+      }));
+
+      // Add 'to' object for compatibility
+      bookingObj.to = bookingObj.dropLocation[0];
+    }
+
+    // Add 'from' object for compatibility
+    if (bookingObj.fromAddress) {
+      bookingObj.from = {
+        address: bookingObj.fromAddress.address,
+        latitude: bookingObj.fromAddress.latitude,
+        longitude: bookingObj.fromAddress.longitude,
+        house: bookingObj.fromAddress.house,
+        receiverName: bookingObj.fromAddress.receiverName,
+        receiverMobile: bookingObj.fromAddress.receiverMobile,
+        tag: bookingObj.fromAddress.tag
+      };
+    }
+
     console.log('✅ Returning ongoing booking with data:', {
       bookingId: bookingObj._id,
       status: bookingObj.status,
       hasCustomer: !!bookingObj.customer,
       customerName: bookingObj.customer?.name || 'No name',
       customerPhone: bookingObj.customer?.phone || 'No phone',
-      rider: bookingObj.rider
+      rider: bookingObj.rider,
+      fromToDropKm: bookingObj.fromToDropKm,
+      price: bookingObj.price
     });
 
     res.json(bookingObj);
@@ -1058,13 +1369,106 @@ exports.updateBookingStep = async (req, res) => {
 exports.completeBooking = async (req, res) => {
   try {
     const bookingId = req.params.id;
-    console.log(bookingId);
-    const booking = await Booking.findByIdAndUpdate(bookingId, { status: 'completed', currentStep: 4 }, { new: true });
+    const { latitude, longitude } = req.body; // Get rider's current location
 
-    console.log(booking);
+    console.log('📋 Completing booking:', bookingId);
+    console.log('📍 Rider location:', { latitude, longitude });
+
+    const booking = await Booking.findByIdAndUpdate(
+      bookingId,
+      { status: 'completed', currentStep: 4, bookingStatus: 'Completed' },
+      { new: true }
+    ).populate('rider', 'phone vehicleType');
+
     if (!booking) return res.status(404).json({ message: 'Booking not found' });
-    res.json({ message: 'Booking completed', booking });
+
+    console.log('✅ Booking completed successfully');
+
+    // If rider location provided, fetch next available bookings within 5km
+    let nextBookings = [];
+    if (latitude && longitude && booking.rider) {
+      try {
+        console.log('🔍 Searching for next available bookings...');
+
+        const riderId = booking.rider._id;
+        const riderPhone = booking.rider.phone;
+        const vehicleType = booking.rider.vehicleType;
+
+        // Normalize vehicle type
+        const normalizeVehicleType = (type) => {
+          if (!type) return null;
+          const typeStr = type.toString().toLowerCase();
+          if (typeStr.includes('2w') || typeStr === '2wheeler' || typeStr === 'bike' || typeStr === 'motorcycle') return '2W';
+          if (typeStr.includes('3w') || typeStr === '3wheeler' || typeStr === 'auto' || typeStr === 'rickshaw') return '3W';
+          if (typeStr.includes('truck') || typeStr === '4w' || typeStr === 'pickup') return 'Truck';
+          if (type === '2W' || type === '3W' || type === 'Truck') return type;
+          return null;
+        };
+
+        const normalizedVehicleType = normalizeVehicleType(vehicleType);
+
+        if (normalizedVehicleType) {
+          // Find available bookings matching criteria
+          const query = {
+            $or: [{ rider: { $exists: false } }, { rider: null }, { rider: '' }],
+            vehicleType: normalizedVehicleType,
+            $and: [
+              {
+                $or: [{ status: 'pending' }, { status: 'in_progress' }, { bookingStatus: 'Ongoing' }, { bookingStatus: 'pending' }]
+              }
+            ],
+            status: { $nin: ['completed', 'cancelled'] },
+            bookingStatus: { $nin: ['Completed', 'completed', 'Cancelled', 'cancelled'] }
+          };
+
+          const availableBookings = await Booking.find(query);
+          console.log(`📦 Found ${availableBookings.length} potential bookings`);
+
+          // Filter bookings within 5km
+          nextBookings = availableBookings
+            .map((b) => {
+              if (!b.fromAddress || !b.fromAddress.latitude || !b.fromAddress.longitude) return null;
+              if (!b.dropLocation || b.dropLocation.length === 0) return null;
+
+              const drop = b.dropLocation[0];
+              const driverToFromKm = getDistanceFromLatLonInKm(latitude, longitude, b.fromAddress.latitude, b.fromAddress.longitude);
+
+              // Only include bookings within 5km
+              if (driverToFromKm > 5) return null;
+
+              let fromToDropKm = 0;
+              if (drop && typeof drop.latitude === 'number' && typeof drop.longitude === 'number') {
+                fromToDropKm = getDistanceFromLatLonInKm(b.fromAddress.latitude, b.fromAddress.longitude, drop.latitude, drop.longitude);
+              }
+
+              return {
+                bookingId: b._id,
+                from: b.fromAddress,
+                to: drop,
+                driverToFromKm: driverToFromKm.toFixed(2),
+                fromToDropKm: fromToDropKm.toFixed(2),
+                price: b.amountPay,
+                status: b.status || b.bookingStatus
+              };
+            })
+            .filter(Boolean);
+
+          console.log(`✅ Found ${nextBookings.length} nearby bookings within 5km`);
+        }
+      } catch (nextBookingsErr) {
+        console.error('⚠️ Error fetching next bookings:', nextBookingsErr.message);
+        // Don't fail the completion if next bookings fetch fails
+      }
+    }
+
+    res.json({
+      message: 'Booking completed',
+      booking,
+      nextBookings: nextBookings,
+      hasNextBookings: nextBookings.length > 0
+    });
   } catch (err) {
+    console.error('❌ Error completing booking:', err);
     res.status(500).json({ message: 'Error completing booking', error: err.message });
   }
 };

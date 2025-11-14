@@ -328,7 +328,10 @@ exports.getAllRiders = async (req, res) => {
       altMobile: rider.phone,
       photo: rider.images?.profilePhoto ? `${req.protocol}://${req.get('host')}/${rider.images.profilePhoto}` : null,
       status: rider.isBlocked === 'true' ? 'Blocked' : 'Active',
-      online: false, // You can add online status logic here
+      online: rider.isOnline || false, // Read from database
+      isOnline: rider.isOnline || false, // Include both fields for compatibility
+      lastSeen: rider.lastSeen || null,
+      lastLocationUpdate: rider.lastLocationUpdate || null,
       rating: 0, // You can add rating logic here
       documentStatus: rider.images && Object.keys(rider.images).length > 2 ? 'Verified' : 'Pending'
     }));
@@ -464,6 +467,72 @@ exports.deleteRider = async (req, res) => {
     res.status(500).json({
       success: false,
       message: 'Error deleting rider',
+      error: error.message
+    });
+  }
+};
+
+// Update rider's online status and location (called when rider goes ON DUTY or updates location)
+exports.updateOnlineStatus = async (req, res) => {
+  try {
+    const { phone, isOnline, latitude, longitude } = req.body;
+
+    if (!phone) {
+      return res.status(400).json({
+        success: false,
+        message: 'Phone number is required'
+      });
+    }
+
+    const updateData = {
+      lastSeen: new Date()
+    };
+
+    // Update isOnline status if provided
+    if (typeof isOnline === 'boolean') {
+      updateData.isOnline = isOnline;
+      console.log(`📱 Setting rider ${phone} online status to:`, isOnline);
+    }
+
+    // Update location if provided
+    if (latitude !== undefined && longitude !== undefined) {
+      updateData.currentLocation = {
+        type: 'Point',
+        coordinates: [parseFloat(longitude), parseFloat(latitude)]
+      };
+      updateData.lastLocationUpdate = new Date();
+      console.log(`📍 Updating location for ${phone}:`, { latitude, longitude });
+    }
+
+    const rider = await Rider.findOneAndUpdate({ phone }, { $set: updateData }, { new: true });
+
+    if (!rider) {
+      return res.status(404).json({
+        success: false,
+        message: 'Rider not found'
+      });
+    }
+
+    console.log('✅ Rider status updated:', {
+      phone: rider.phone,
+      isOnline: rider.isOnline,
+      location: rider.currentLocation?.coordinates
+    });
+
+    res.status(200).json({
+      success: true,
+      message: 'Rider status updated successfully',
+      data: {
+        isOnline: rider.isOnline,
+        lastSeen: rider.lastSeen,
+        currentLocation: rider.currentLocation
+      }
+    });
+  } catch (error) {
+    console.error('❌ Error updating rider status:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error updating rider status',
       error: error.message
     });
   }
