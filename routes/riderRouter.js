@@ -28,7 +28,13 @@ router.put(
   ]),
   riderController.updateRider
 );
+
+// Export routes - MUST be before /:id route to avoid conflicts
+router.get('/export/excel', riderController.exportDriversToExcel);
+router.get('/export/documents', riderController.exportDriversDocuments);
+
 router.get('/get/rider', riderController.getRiderById);
+router.get('/:id', riderController.getRiderById); // Support fetching by ID in URL params
 router.get('/all/riders', riderController.getAllRiders);
 
 // Update online status and location
@@ -40,5 +46,11 @@ router.patch('/:id/unblock', riderController.unblockRider);
 
 // Delete rider route
 router.delete('/:id', riderController.deleteRider);
+
+// Document approval routes
+router.patch('/:id/approve-document', riderController.approveIndividualDocument);
+router.patch('/:id/reject-document', riderController.rejectIndividualDocument);
+router.patch('/:id/approve', riderController.approveAllDocuments);
+router.patch('/:id/reject', riderController.rejectAllDocuments);
 
 module.exports = router;

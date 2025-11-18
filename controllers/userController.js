@@ -1,6 +1,7 @@
 const User = require('../models/User');
 const jwt = require('jsonwebtoken');
 const path = require('path');
+const XLSX = require('xlsx');
 
 // Get all users with filters (for admin)
 exports.getAllUsers = async (req, res) => {
@@ -302,6 +303,202 @@ exports.deleteUser = async (req, res) => {
     res.status(500).json({
       success: false,
       message: 'Error deleting user',
+      error: error.message
+    });
+  }
+};
+
+// Export customers data to Excel
+exports.exportCustomersToExcel = async (req, res) => {
+  try {
+    console.log('📊 Exporting customers to Excel...');
+
+    const { search, role, status } = req.query;
+    const query = {};
+
+    if (role) query.role = role;
+    if (status) query.status = status;
+
+    // Search filter
+    if (search) {
+      query.$or = [
+        { name: { $regex: search, $options: 'i' } },
+        { email: { $regex: search, $options: 'i' } },
+        { phone: { $regex: search, $options: 'i' } },
+        { customerId: { $regex: search, $options: 'i' } }
+      ];
+    }
+
+    const users = await User.find(query).select('customerId name email phone address city role status createdAt').lean();
+
+    console.log(`📊 Found ${users.length} customers to export`);
+
+    // Check if there are users to export
+    if (users.length === 0) {
+      console.log('⚠️ No customers found to export');
+      const excelData = [
+        {
+          'S.No': '',
+          'Customer ID': '',
+          Name: '',
+          Email: '',
+          Phone: '',
+          Address: '',
+          City: '',
+          Role: '',
+          Status: '',
+          'Registration Date': ''
+        }
+      ];
+
+      const wb = XLSX.utils.book_new();
+      const ws = XLSX.utils.json_to_sheet(excelData);
+      XLSX.utils.book_append_sheet(wb, ws, 'Customers');
+      const excelBuffer = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
+
+      res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+      res.setHeader('Content-Disposition', `attachment; filename=customers_data_${new Date().toISOString().split('T')[0]}.xlsx`);
+      return res.send(excelBuffer);
+    }
+
+    // Transform data for Excel export
+    const excelData = users.map((user, index) => ({
+      'S.No': index + 1,
+      'Customer ID': user.customerId || 'N/A',
+      Name: user.name || 'N/A',
+      Email: user.email || 'N/A',
+      Phone: user.phone || 'N/A',
+      Address: user.address || 'N/A',
+      City: user.city || 'N/A',
+      Role: user.role || 'customer',
+      Status: user.status || 'Active',
+      'Registration Date': user.createdAt ? new Date(user.createdAt).toLocaleDateString() : 'N/A'
+    }));
+
+    // Create workbook and worksheet
+    const wb = XLSX.utils.book_new();
+    const ws = XLSX.utils.json_to_sheet(excelData);
+
+    // Add worksheet to workbook
+    XLSX.utils.book_append_sheet(wb, ws, 'Customers');
+
+    // Generate Excel file buffer
+    const excelBuffer = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
+
+    // Set headers for file download
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', `attachment; filename=customers_data_${new Date().toISOString().split('T')[0]}.xlsx`);
+
+    // Send the Excel file
+    res.send(excelBuffer);
+    console.log(`✅ Excel file sent successfully with ${excelData.length} customers`);
+  } catch (error) {
+    console.error('❌ Error exporting customers to Excel:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error exporting customers data',
+      error: error.message
+    });
+  }
+};
+
+// Export customers detailed data to Excel
+exports.exportCustomersDocuments = async (req, res) => {
+  try {
+    console.log('📄 Exporting customers detailed data...');
+
+    const { search, role, status } = req.query;
+    const query = {};
+
+    if (role) query.role = role;
+    if (status) query.status = status;
+
+    // Search filter
+    if (search) {
+      query.$or = [
+        { name: { $regex: search, $options: 'i' } },
+        { email: { $regex: search, $options: 'i' } },
+        { phone: { $regex: search, $options: 'i' } },
+        { customerId: { $regex: search, $options: 'i' } }
+      ];
+    }
+
+    const users = await User.find(query)
+      .select('customerId name email phone altMobile address city pincode role status createdAt referralCode')
+      .lean();
+
+    console.log(`📄 Found ${users.length} customers with detailed data to export`);
+
+    // Check if there are users to export
+    if (users.length === 0) {
+      console.log('⚠️ No customers found to export');
+      const documentsData = [
+        {
+          'S.No': '',
+          'Customer ID': '',
+          Name: '',
+          Email: '',
+          Phone: '',
+          'Alternative Phone': '',
+          Address: '',
+          City: '',
+          Pincode: '',
+          Role: '',
+          Status: '',
+          'Referral Code': '',
+          'Registration Date': ''
+        }
+      ];
+
+      const wb = XLSX.utils.book_new();
+      const ws = XLSX.utils.json_to_sheet(documentsData);
+      XLSX.utils.book_append_sheet(wb, ws, 'Customer Details');
+      const excelBuffer = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
+
+      res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+      res.setHeader('Content-Disposition', `attachment; filename=customers_documents_${new Date().toISOString().split('T')[0]}.xlsx`);
+      return res.send(excelBuffer);
+    }
+
+    // Transform data for document export
+    const documentsData = users.map((user, index) => ({
+      'S.No': index + 1,
+      'Customer ID': user.customerId || 'N/A',
+      Name: user.name || 'N/A',
+      Email: user.email || 'N/A',
+      Phone: user.phone || 'N/A',
+      'Alternative Phone': user.altMobile || 'N/A',
+      Address: user.address || 'N/A',
+      City: user.city || 'N/A',
+      Pincode: user.pincode || 'N/A',
+      Role: user.role || 'customer',
+      Status: user.status || 'Active',
+      'Referral Code': user.referralCode || 'N/A',
+      'Registration Date': user.createdAt ? new Date(user.createdAt).toLocaleDateString() : 'N/A'
+    }));
+
+    // Create workbook and worksheet
+    const wb = XLSX.utils.book_new();
+    const ws = XLSX.utils.json_to_sheet(documentsData);
+
+    // Add worksheet to workbook
+    XLSX.utils.book_append_sheet(wb, ws, 'Customer Details');
+
+    // Generate Excel file buffer
+    const excelBuffer = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
+
+    // Set headers for file download
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', `attachment; filename=customers_documents_${new Date().toISOString().split('T')[0]}.xlsx`);
+
+    // Send the Excel file
+    res.send(excelBuffer);
+    console.log(`✅ Documents Excel file sent successfully with ${documentsData.length} customers`);
+  } catch (error) {
+    console.error('❌ Error exporting customers documents:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error exporting customers documents',
       error: error.message
     });
   }

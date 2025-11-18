@@ -14,10 +14,16 @@ const {
   completeBooking,
   getOrderHistory,
   collectCash,
-  saveDropLocation
+  saveDropLocation,
+  exportOrderDetailsToExcel,
+  exportCancelDetailsToExcel
 } = require('../controllers/bookingController');
 const multer = require('../utils/multerConfig');
 const { auth } = require('../middlewares/auth');
+
+// Export routes - MUST be before any routes with :id parameter
+router.get('/export/order-details', exportOrderDetailsToExcel);
+router.get('/export/cancel-details', exportCancelDetailsToExcel);
 
 // const { authMiddle } = require('../middlewares/auth');
 router.post('/create-with-details', auth, multer.fields([{ name: 'productImages', maxCount: 4 }]), createBooking);

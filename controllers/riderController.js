@@ -141,6 +141,7 @@
 
 const Rider = require('../models/RiderSchema');
 const jwt = require('jsonwebtoken');
+const XLSX = require('xlsx');
 
 // ...existing code...
 
@@ -246,18 +247,51 @@ exports.updateRider = async (req, res) => {
 
 // ...existing code...
 
-// // Get a single rider by ID
+// // Get a single rider by ID or phone number
 exports.getRiderById = async (req, res) => {
   try {
-    // For GET requests, use req.query
-    const number = req.query.number || req.body?.number || req.params?.number || req.headers['number'];
+    // Support multiple ways to identify rider
+    const identifier = req.query.number || req.body?.number || req.params?.id || req.params?.number || req.headers['number'];
 
-    const rider = await Rider.findOne({ phone: number });
+    if (!identifier) {
+      return res.status(400).json({
+        success: false,
+        message: 'Rider ID or phone number is required'
+      });
+    }
 
-    if (!rider) return res.status(404).json({ error: 'Rider not found' });
-    res.json(rider);
+    let rider;
+
+    // Check if identifier looks like a MongoDB ObjectId (24 hex characters)
+    if (identifier.match(/^[0-9a-fA-F]{24}$/)) {
+      console.log('🔍 Fetching rider by MongoDB ID:', identifier);
+      rider = await Rider.findById(identifier);
+    } else {
+      // Assume it's a phone number or customerId
+      console.log('🔍 Fetching rider by phone/customerId:', identifier);
+      rider = await Rider.findOne({
+        $or: [{ phone: identifier }, { customerId: identifier }]
+      });
+    }
+
+    if (!rider) {
+      return res.status(404).json({
+        success: false,
+        message: 'Rider not found'
+      });
+    }
+
+    res.status(200).json({
+      success: true,
+      data: rider
+    });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    console.error('Error in getRiderById:', err);
+    res.status(500).json({
+      success: false,
+      message: 'Error fetching rider',
+      error: err.message
+    });
   }
 };
 
@@ -315,7 +349,9 @@ exports.getAllRiders = async (req, res) => {
         name: riders[0].name,
         vehicleregisterNumber: riders[0].vehicleregisterNumber,
         vehicleType: riders[0].vehicleType,
-        vehicleSubType: riders[0].vehicleSubType
+        vehicleSubType: riders[0].vehicleSubType,
+        documentStatus: riders[0].documentStatus,
+        rejectionReason: riders[0].rejectionReason
       });
     }
 
@@ -333,7 +369,12 @@ exports.getAllRiders = async (req, res) => {
       lastSeen: rider.lastSeen || null,
       lastLocationUpdate: rider.lastLocationUpdate || null,
       rating: 0, // You can add rating logic here
-      documentStatus: rider.images && Object.keys(rider.images).length > 2 ? 'Verified' : 'Pending'
+      // Use actual documentStatus from database, or default based on images
+      documentStatus: rider.documentStatus || (rider.images && Object.keys(rider.images).length > 2 ? 'Pending' : 'Pending'),
+      rejectionReason: rider.rejectionReason || null,
+      documentApprovals: rider.documentApprovals || {},
+      documentRejectionReasons: rider.documentRejectionReasons || {},
+      blockReason: rider.blockReason || null
     }));
 
     const total = await Rider.countDocuments(filter);
@@ -357,16 +398,23 @@ exports.getAllRiders = async (req, res) => {
 exports.blockRider = async (req, res) => {
   try {
     const { id } = req.params;
+    const { reason } = req.body;
     let rider;
 
-    console.log('🚫 Blocking rider with ID:', id);
+    console.log('🚫 Blocking rider with ID:', id, 'Reason:', reason);
+
+    const updateData = {
+      isBlocked: 'true',
+      blockReason: reason || 'No reason provided',
+      blockedAt: new Date()
+    };
 
     // Check if ID looks like a MongoDB ObjectId (24 hex characters)
     if (id.match(/^[0-9a-fA-F]{24}$/)) {
-      rider = await Rider.findByIdAndUpdate(id, { isBlocked: 'true' }, { new: true });
+      rider = await Rider.findByIdAndUpdate(id, updateData, { new: true });
     } else {
       // Assume it's a phone number
-      rider = await Rider.findOneAndUpdate({ phone: id }, { isBlocked: 'true' }, { new: true });
+      rider = await Rider.findOneAndUpdate({ phone: id }, updateData, { new: true });
     }
 
     if (!rider) {
@@ -401,9 +449,15 @@ exports.unblockRider = async (req, res) => {
 
     console.log('✅ Unblocking rider with ID:', id);
 
+    const updateData = {
+      isBlocked: 'false',
+      blockReason: null,
+      unblockedAt: new Date()
+    };
+
     // Check if ID looks like a MongoDB ObjectId (24 hex characters)
     if (id.match(/^[0-9a-fA-F]{24}$/)) {
-      rider = await Rider.findByIdAndUpdate(id, { isBlocked: 'false' }, { new: true });
+      rider = await Rider.findByIdAndUpdate(id, updateData, { new: true });
     } else {
       // Assume it's a phone number
       rider = await Rider.findOneAndUpdate({ phone: id }, { isBlocked: 'false' }, { new: true });
@@ -533,6 +587,430 @@ exports.updateOnlineStatus = async (req, res) => {
     res.status(500).json({
       success: false,
       message: 'Error updating rider status',
+      error: error.message
+    });
+  }
+};
+
+// Approve individual document
+exports.approveIndividualDocument = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { documentField } = req.body;
+
+    console.log('✅ Approving individual document:', { riderId: id, documentField });
+
+    if (!documentField) {
+      return res.status(400).json({
+        success: false,
+        message: 'Document field is required'
+      });
+    }
+
+    const rider = await Rider.findById(id);
+
+    if (!rider) {
+      return res.status(404).json({
+        success: false,
+        message: 'Rider not found'
+      });
+    }
+
+    // Initialize documentApprovals if it doesn't exist
+    if (!rider.documentApprovals) {
+      rider.documentApprovals = {};
+    }
+
+    // Approve the specific document
+    rider.documentApprovals[documentField] = 'approved';
+    rider.markModified('documentApprovals');
+
+    await rider.save();
+
+    console.log('✅ Document approved successfully:', { riderId: id, documentField });
+
+    res.status(200).json({
+      success: true,
+      message: 'Document approved successfully',
+      data: {
+        documentField,
+        status: 'approved'
+      }
+    });
+  } catch (error) {
+    console.error('❌ Error approving document:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error approving document',
+      error: error.message
+    });
+  }
+};
+
+// Reject individual document
+exports.rejectIndividualDocument = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { documentField, reason } = req.body;
+
+    console.log('❌ Rejecting individual document:', { riderId: id, documentField, reason });
+
+    if (!documentField) {
+      return res.status(400).json({
+        success: false,
+        message: 'Document field is required'
+      });
+    }
+
+    if (!reason || reason.trim() === '') {
+      return res.status(400).json({
+        success: false,
+        message: 'Rejection reason is required'
+      });
+    }
+
+    const rider = await Rider.findById(id);
+
+    if (!rider) {
+      return res.status(404).json({
+        success: false,
+        message: 'Rider not found'
+      });
+    }
+
+    // Initialize fields if they don't exist
+    if (!rider.documentApprovals) {
+      rider.documentApprovals = {};
+    }
+    if (!rider.documentRejectionReasons) {
+      rider.documentRejectionReasons = {};
+    }
+
+    // Reject the specific document and store reason
+    rider.documentApprovals[documentField] = 'rejected';
+    rider.documentRejectionReasons[documentField] = reason;
+    rider.markModified('documentApprovals');
+    rider.markModified('documentRejectionReasons');
+
+    await rider.save();
+
+    console.log('✅ Document rejected successfully:', { riderId: id, documentField, reason });
+
+    res.status(200).json({
+      success: true,
+      message: 'Document rejected successfully',
+      data: {
+        documentField,
+        status: 'rejected',
+        reason
+      }
+    });
+  } catch (error) {
+    console.error('❌ Error rejecting document:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error rejecting document',
+      error: error.message
+    });
+  }
+};
+
+// Reject all documents for a rider
+exports.rejectAllDocuments = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { reason } = req.body;
+
+    console.log('❌ Rejecting all documents for rider:', id, 'Reason:', reason);
+
+    if (!reason || reason.trim() === '') {
+      return res.status(400).json({
+        success: false,
+        message: 'Rejection reason is required'
+      });
+    }
+
+    const rider = await Rider.findById(id);
+
+    if (!rider) {
+      return res.status(404).json({
+        success: false,
+        message: 'Rider not found'
+      });
+    }
+
+    // Store the overall rejection reason
+    rider.rejectionReason = reason;
+    rider.documentStatus = 'Rejected';
+
+    await rider.save();
+
+    console.log('✅ All documents rejected successfully for rider:', id);
+
+    res.status(200).json({
+      success: true,
+      message: 'All documents rejected successfully',
+      data: {
+        riderId: id,
+        rejectionReason: reason,
+        documentStatus: 'Rejected'
+      }
+    });
+  } catch (error) {
+    console.error('❌ Error rejecting all documents:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error rejecting all documents',
+      error: error.message
+    });
+  }
+};
+
+// Approve all documents for a rider
+exports.approveAllDocuments = async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    console.log('✅ Approving all documents for rider:', id);
+
+    const rider = await Rider.findById(id);
+
+    if (!rider) {
+      return res.status(404).json({
+        success: false,
+        message: 'Rider not found'
+      });
+    }
+
+    // Update document status to Approved and clear any rejection reason
+    rider.documentStatus = 'Approved';
+    rider.rejectionReason = null;
+
+    await rider.save();
+
+    console.log('✅ All documents approved successfully for rider:', id);
+
+    res.status(200).json({
+      success: true,
+      message: 'All documents approved successfully',
+      data: {
+        riderId: id,
+        documentStatus: 'Approved'
+      }
+    });
+  } catch (error) {
+    console.error('❌ Error approving all documents:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error approving all documents',
+      error: error.message
+    });
+  }
+};
+
+// Export drivers data to Excel
+exports.exportDriversToExcel = async (req, res) => {
+  try {
+    console.log('📊 Exporting drivers to Excel...');
+
+    const { vehicleType, city, isBlocked } = req.query;
+    const query = {};
+
+    if (vehicleType) query.vehicleType = vehicleType;
+    if (city) query.selectCity = city;
+    if (isBlocked !== undefined) query.isBlocked = isBlocked === 'true';
+
+    const riders = await Rider.find(query)
+      .select('name phone email driverId vehicleType selectCity isBlocked documentStatus createdAt images vehiclenumber')
+      .lean();
+
+    console.log(`📊 Found ${riders.length} drivers to export`);
+
+    // Check if there are riders to export
+    if (riders.length === 0) {
+      console.log('⚠️ No drivers found to export');
+      // Still create an Excel file with headers only
+      const excelData = [
+        {
+          'S.No': '',
+          'Driver ID': '',
+          Name: '',
+          Phone: '',
+          Email: '',
+          'Vehicle Type': '',
+          'Vehicle Number': '',
+          City: '',
+          Status: '',
+          'Document Status': '',
+          'Registration Date': '',
+          'Aadhar Front': '',
+          'Aadhar Back': '',
+          'PAN Card': '',
+          'Driving License': '',
+          'Vehicle RC': '',
+          'Vehicle Insurance': ''
+        }
+      ];
+
+      const wb = XLSX.utils.book_new();
+      const ws = XLSX.utils.json_to_sheet(excelData);
+      XLSX.utils.book_append_sheet(wb, ws, 'Drivers');
+      const excelBuffer = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
+
+      res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+      res.setHeader('Content-Disposition', `attachment; filename=drivers_data_${new Date().toISOString().split('T')[0]}.xlsx`);
+      return res.send(excelBuffer);
+    }
+
+    // Transform data for Excel export
+    const excelData = riders.map((rider, index) => ({
+      'S.No': index + 1,
+      'Driver ID': rider.driverId || 'N/A',
+      Name: rider.name || 'N/A',
+      Phone: rider.phone || 'N/A',
+      Email: rider.email || 'N/A',
+      'Vehicle Type': rider.vehicleType || 'N/A',
+      'Vehicle Number': rider.vehiclenumber || 'N/A',
+      City: rider.selectCity || 'N/A',
+      Status: rider.isBlocked ? 'Blocked' : 'Active',
+      'Document Status': rider.documentStatus || 'Pending',
+      'Registration Date': rider.createdAt ? new Date(rider.createdAt).toLocaleDateString() : 'N/A',
+      'Aadhar Front': rider.images?.FrontaadharCard ? 'Yes' : 'No',
+      'Aadhar Back': rider.images?.BackaadharCard ? 'Yes' : 'No',
+      'PAN Card': rider.images?.panCard ? 'Yes' : 'No',
+      'Driving License': rider.images?.drivingLicenseFront ? 'Yes' : 'No',
+      'Vehicle RC': rider.images?.vehicleRcFront ? 'Yes' : 'No',
+      'Vehicle Insurance': rider.images?.vehicleInsurence ? 'Yes' : 'No'
+    }));
+
+    // Create workbook and worksheet
+    const wb = XLSX.utils.book_new();
+    const ws = XLSX.utils.json_to_sheet(excelData);
+
+    // Add worksheet to workbook
+    XLSX.utils.book_append_sheet(wb, ws, 'Drivers');
+
+    // Generate Excel file buffer
+    const excelBuffer = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
+
+    // Set headers for file download
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', `attachment; filename=drivers_data_${new Date().toISOString().split('T')[0]}.xlsx`);
+
+    // Send the Excel file
+    res.send(excelBuffer);
+    console.log(`✅ Excel file sent successfully with ${excelData.length} drivers`);
+  } catch (error) {
+    console.error('❌ Error exporting drivers to Excel:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error exporting drivers data',
+      error: error.message
+    });
+  }
+};
+
+// Export drivers documents data
+exports.exportDriversDocuments = async (req, res) => {
+  try {
+    console.log('📄 Exporting drivers documents...');
+
+    const { vehicleType, city, documentStatus } = req.query;
+    const query = {};
+
+    if (vehicleType) query.vehicleType = vehicleType;
+    if (city) query.selectCity = city;
+    if (documentStatus) query.documentStatus = documentStatus;
+
+    const riders = await Rider.find(query).select('name phone driverId vehicleType selectCity documentStatus images createdAt').lean();
+
+    console.log(`📄 Found ${riders.length} drivers with documents to export`);
+
+    // Check if there are riders to export
+    if (riders.length === 0) {
+      console.log('⚠️ No drivers found to export documents');
+      // Still create an Excel file with headers only
+      const documentsData = [
+        {
+          'S.No': '',
+          'Driver ID': '',
+          Name: '',
+          Phone: '',
+          'Vehicle Type': '',
+          City: '',
+          'Document Status': '',
+          'Registration Date': '',
+          'Aadhar Front': '',
+          'Aadhar Back': '',
+          'PAN Card': '',
+          'Driving License Front': '',
+          'Driving License Back': '',
+          'Vehicle RC Front': '',
+          'Vehicle RC Back': '',
+          'Vehicle Image Front': '',
+          'Vehicle Image Back': '',
+          'Vehicle Insurance': '',
+          'Bank Passbook': '',
+          'Owner Selfie': ''
+        }
+      ];
+
+      const wb = XLSX.utils.book_new();
+      const ws = XLSX.utils.json_to_sheet(documentsData);
+      XLSX.utils.book_append_sheet(wb, ws, 'Driver Documents');
+      const excelBuffer = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
+
+      res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+      res.setHeader('Content-Disposition', `attachment; filename=drivers_documents_${new Date().toISOString().split('T')[0]}.xlsx`);
+      return res.send(excelBuffer);
+    }
+
+    // Transform data for document export
+    const documentsData = riders.map((rider, index) => ({
+      'S.No': index + 1,
+      'Driver ID': rider.driverId || 'N/A',
+      Name: rider.name || 'N/A',
+      Phone: rider.phone || 'N/A',
+      'Vehicle Type': rider.vehicleType || 'N/A',
+      City: rider.selectCity || 'N/A',
+      'Document Status': rider.documentStatus || 'Pending',
+      'Registration Date': rider.createdAt ? new Date(rider.createdAt).toLocaleDateString() : 'N/A',
+      'Aadhar Front': rider.images?.FrontaadharCard || 'Not Uploaded',
+      'Aadhar Back': rider.images?.BackaadharCard || 'Not Uploaded',
+      'PAN Card': rider.images?.panCard || 'Not Uploaded',
+      'Driving License Front': rider.images?.drivingLicenseFront || 'Not Uploaded',
+      'Driving License Back': rider.images?.drivingLicenseBack || 'Not Uploaded',
+      'Vehicle RC Front': rider.images?.vehicleRcFront || 'Not Uploaded',
+      'Vehicle RC Back': rider.images?.vehicleRcBack || 'Not Uploaded',
+      'Vehicle Image Front': rider.images?.vehicleimageFront || 'Not Uploaded',
+      'Vehicle Image Back': rider.images?.vehicleimageBack || 'Not Uploaded',
+      'Vehicle Insurance': rider.images?.vehicleInsurence || 'Not Uploaded',
+      'Bank Passbook': rider.images?.bankPassbook || 'Not Uploaded',
+      'Owner Selfie': rider.images?.ownerSelfie || 'Not Uploaded'
+    }));
+
+    // Create workbook and worksheet
+    const wb = XLSX.utils.book_new();
+    const ws = XLSX.utils.json_to_sheet(documentsData);
+
+    // Add worksheet to workbook
+    XLSX.utils.book_append_sheet(wb, ws, 'Driver Documents');
+
+    // Generate Excel file buffer
+    const excelBuffer = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
+
+    // Set headers for file download
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', `attachment; filename=drivers_documents_${new Date().toISOString().split('T')[0]}.xlsx`);
+
+    // Send the Excel file
+    res.send(excelBuffer);
+    console.log(`✅ Documents Excel file sent successfully with ${documentsData.length} drivers`);
+  } catch (error) {
+    console.error('❌ Error exporting drivers documents:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error exporting drivers documents',
       error: error.message
     });
   }

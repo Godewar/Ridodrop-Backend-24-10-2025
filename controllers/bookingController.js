@@ -2,17 +2,61 @@ const mongoose = require('mongoose');
 const Booking = require('../models/Booking');
 const Rider = require('../models/RiderSchema');
 const User = require('../models/User');
+const XLSX = require('xlsx');
 
 // Get all orders/bookings with filters
 exports.getAllOrders = async (req, res) => {
   try {
-    const { page = 1, limit = 10, search, vehicleType, status, customerId, startDate, endDate } = req.query;
+    const { page = 1, limit = 10, search, vehicleType, status, customerId, riderId, driverId, startDate, endDate } = req.query;
 
     // Build filter object
     const filter = {};
 
     if (customerId) {
       filter.userId = customerId;
+    }
+
+    // Support filtering by rider/driver ID
+    if (riderId || driverId) {
+      const riderIdentifier = riderId || driverId;
+
+      // Try to find rider to support both _id and phone number
+      let riderFilter = null;
+
+      // Check if it's a MongoDB ObjectId
+      if (mongoose.Types.ObjectId.isValid(riderIdentifier)) {
+        riderFilter = { $or: [{ driver: riderIdentifier }] };
+
+        // Also check if this ID matches a rider by phone
+        try {
+          const riderByPhone = await Rider.findById(riderIdentifier).select('phone');
+          if (riderByPhone && riderByPhone.phone) {
+            riderFilter.$or.push({ rider: riderByPhone.phone });
+          }
+        } catch (err) {
+          console.log('Could not find rider by ID:', err.message);
+        }
+      } else {
+        // Assume it's a phone number or riderId
+        riderFilter = { $or: [{ rider: riderIdentifier }] };
+
+        // Also try to find the ObjectId for this rider
+        try {
+          const riderByPhone = await Rider.findOne({
+            $or: [{ phone: riderIdentifier }, { riderId: riderIdentifier }]
+          }).select('_id');
+
+          if (riderByPhone) {
+            riderFilter.$or.push({ driver: riderByPhone._id });
+          }
+        } catch (err) {
+          console.log('Could not find rider by phone/riderId:', err.message);
+        }
+      }
+
+      if (riderFilter) {
+        Object.assign(filter, riderFilter);
+      }
     }
 
     if (vehicleType) {
@@ -31,12 +75,72 @@ exports.getAllOrders = async (req, res) => {
       };
     }
 
+    // Search filter - search by customer name, rider name, or mobile numbers
+    let searchUserIds = [];
+    let searchRiderIds = [];
+    if (search) {
+      try {
+        // Search for users (customers) by name or phone
+        const users = await User.find({
+          $or: [
+            { name: { $regex: search, $options: 'i' } },
+            { lname: { $regex: search, $options: 'i' } },
+            { phone: { $regex: search, $options: 'i' } },
+            { customerId: { $regex: search, $options: 'i' } }
+          ]
+        }).select('_id phone customerId');
+
+        searchUserIds = users.map((u) => u._id.toString());
+        const userPhones = users.map((u) => u.phone);
+        const userCustomerIds = users.map((u) => u.customerId);
+
+        // Search for riders (drivers) by name or phone
+        const riders = await Rider.find({
+          $or: [
+            { name: { $regex: search, $options: 'i' } },
+            { phone: { $regex: search, $options: 'i' } },
+            { riderId: { $regex: search, $options: 'i' } }
+          ]
+        }).select('_id phone riderId');
+
+        searchRiderIds = riders.map((r) => r._id);
+        const riderPhones = riders.map((r) => r.phone);
+
+        // Build search filter for bookings
+        const searchFilters = [];
+
+        // Match by user ID (MongoDB ObjectId or customerId string)
+        if (searchUserIds.length > 0) {
+          searchFilters.push({ userId: { $in: [...searchUserIds, ...userPhones, ...userCustomerIds] } });
+        }
+
+        // Match by rider/driver
+        if (searchRiderIds.length > 0) {
+          searchFilters.push({ driver: { $in: searchRiderIds } });
+          searchFilters.push({ rider: { $in: riderPhones } });
+        }
+
+        // Add search filter to main filter
+        if (searchFilters.length > 0) {
+          if (filter.$or) {
+            // Merge with existing $or conditions
+            filter.$and = [{ $or: filter.$or }, { $or: searchFilters }];
+            delete filter.$or;
+          } else {
+            filter.$or = searchFilters;
+          }
+        }
+      } catch (searchErr) {
+        console.error('❌ Search error:', searchErr);
+      }
+    }
+
     // Pagination
     const skip = (parseInt(page) - 1) * parseInt(limit);
 
     // Get bookings with populated user data
     const bookings = await Booking.find(filter)
-      .populate('driver', 'riderId name phone vehicleType') // Use driver field instead of rider
+      .populate('driver', 'riderId name phone vehicleType vehicleregisterNumber') // Use driver field instead of rider
       .sort({ createdAt: -1 })
       .skip(skip)
       .limit(parseInt(limit));
@@ -93,7 +197,7 @@ exports.getAllOrders = async (req, res) => {
                 { riderId: booking.rider },
                 { _id: mongoose.Types.ObjectId.isValid(booking.rider) ? booking.rider : null }
               ]
-            }).select('riderId name phone vehicleType');
+            }).select('riderId name phone vehicleType vehicleregisterNumber');
 
             console.log('🚗 Found rider:', riderData ? riderData.name : 'Not found');
           } catch (err) {
@@ -123,7 +227,8 @@ exports.getAllOrders = async (req, res) => {
                 name: riderData.name || 'Unknown Driver',
                 phone: riderData.phone,
                 mobile: riderData.phone,
-                vehicleType: riderData.vehicleType
+                vehicleType: riderData.vehicleType,
+                vehicleregisterNumber: riderData.vehicleregisterNumber
               }
             : null
         };
@@ -954,17 +1059,14 @@ exports.getAvailableBookingsForDriver = async (req, res) => {
 
     console.log('🚗 Driver vehicle type (normalized):', normalizedVehicleType);
 
-    // Find bookings that are not yet assigned to a rider, are ongoing/pending, and match vehicle type
+    // Find bookings that are not yet assigned to ANY rider, are pending, and match vehicle type
+    // IMPORTANT: Only show bookings that have NO rider assigned (exclude accepted orders)
     const query = {
       $or: [{ rider: { $exists: false } }, { rider: null }, { rider: '' }],
       vehicleType: normalizedVehicleType, // Use normalized vehicle type
-      $and: [
-        {
-          $or: [{ status: 'pending' }, { status: 'in_progress' }, { bookingStatus: 'Ongoing' }, { bookingStatus: 'pending' }]
-        }
-      ],
-      status: { $nin: ['completed', 'cancelled'] },
-      bookingStatus: { $nin: ['Completed', 'completed', 'Cancelled', 'cancelled'] }
+      // Only show bookings with 'pending' status (not 'accepted' or 'in_progress')
+      status: 'pending',
+      bookingStatus: { $nin: ['Completed', 'completed', 'Cancelled', 'cancelled', 'Ongoing', 'In Progress', 'Accepted'] }
     };
 
     console.log('🔍 Query:', JSON.stringify(query, null, 2));
@@ -1575,5 +1677,223 @@ exports.saveDropLocation = async (req, res) => {
   } catch (err) {
     console.error(err);
     return res.status(500).json({ message: 'Failed to save drop location.' });
+  }
+};
+
+// Export Order Details to Excel
+exports.exportOrderDetailsToExcel = async (req, res) => {
+  try {
+    const { search, vehicleType, status, customerId } = req.query;
+
+    // Build filter object
+    const filter = {};
+
+    if (customerId) {
+      filter.userId = customerId;
+    }
+
+    if (vehicleType) {
+      filter.vehicleType = vehicleType;
+    }
+
+    if (status) {
+      filter.status = status;
+    }
+
+    // Search filter
+    if (search) {
+      const users = await User.find({
+        $or: [{ name: { $regex: search, $options: 'i' } }, { customerId: { $regex: search, $options: 'i' } }]
+      }).select('_id');
+
+      const userIds = users.map((u) => u._id);
+      filter.$or = [{ userId: { $in: userIds } }, { orderId: { $regex: search, $options: 'i' } }];
+    }
+
+    // Get all bookings matching filter
+    const bookings = await Booking.find(filter)
+      .populate('userId', 'name customerId phone')
+      .populate('driver', 'name riderId phone')
+      .sort({ createdAt: -1 });
+
+    // Prepare data for Excel
+    const excelData = bookings.map((booking, index) => ({
+      'S.No': index + 1,
+      'Order ID': booking.orderId || booking._id.toString().slice(-8).toUpperCase(),
+      'Customer ID': booking.userId?.customerId || 'N/A',
+      'Customer Name': booking.userId?.name || 'N/A',
+      'Customer Phone': booking.userId?.phone || 'N/A',
+      'Vehicle Type': booking.vehicleType || 'N/A',
+      Status: booking.status || 'N/A',
+      'Amount (₹)': booking.totalPrice || booking.price || 0,
+      'Payment Method': booking.paymentMethod || 'N/A',
+      'Pickup Address': booking.fromLocation?.address || booking.fromAddress || 'N/A',
+      'Drop Address': booking.toLocation?.address || booking.toAddress || 'N/A',
+      'Driver Name': booking.driver?.name || 'N/A',
+      'Driver Phone': booking.driver?.phone || 'N/A',
+      'Order Date': booking.createdAt ? new Date(booking.createdAt).toLocaleDateString('en-IN') : 'N/A',
+      'Order Time': booking.createdAt ? new Date(booking.createdAt).toLocaleTimeString('en-IN') : 'N/A'
+    }));
+
+    // Handle empty data case
+    if (excelData.length === 0) {
+      excelData.push({
+        'S.No': '',
+        'Order ID': '',
+        'Customer ID': '',
+        'Customer Name': '',
+        'Customer Phone': '',
+        'Vehicle Type': '',
+        Status: '',
+        'Amount (₹)': '',
+        'Payment Method': '',
+        'Pickup Address': '',
+        'Drop Address': '',
+        'Driver Name': '',
+        'Driver Phone': '',
+        'Order Date': '',
+        'Order Time': ''
+      });
+    }
+
+    // Create workbook and worksheet
+    const wb = XLSX.utils.book_new();
+    const ws = XLSX.utils.json_to_sheet(excelData);
+
+    // Add worksheet to workbook
+    XLSX.utils.book_append_sheet(wb, ws, 'Order Details');
+
+    // Generate buffer
+    const excelBuffer = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
+
+    // Set headers for file download
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', `attachment; filename=order_details_${new Date().toISOString().split('T')[0]}.xlsx`);
+
+    // Send file
+    res.send(excelBuffer);
+  } catch (error) {
+    console.error('Error exporting order details to Excel:', error);
+    res.status(500).json({ success: false, message: 'Failed to export order details', error: error.message });
+  }
+};
+
+// Export Cancel Details to Excel
+exports.exportCancelDetailsToExcel = async (req, res) => {
+  try {
+    const { search, dateFilter, customDate } = req.query;
+
+    // Build filter object for cancelled bookings
+    const filter = { status: 'Cancelled' };
+
+    // Date filtering
+    if (dateFilter && dateFilter !== 'all') {
+      const now = new Date();
+      let startDate;
+
+      switch (dateFilter) {
+        case 'today':
+          startDate = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+          break;
+        case 'week':
+          startDate = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
+          break;
+        case 'month':
+          startDate = new Date(now.getFullYear(), now.getMonth(), 1);
+          break;
+        case 'year':
+          startDate = new Date(now.getFullYear(), 0, 1);
+          break;
+        case 'custom':
+          if (customDate) {
+            startDate = new Date(customDate);
+            startDate.setHours(0, 0, 0, 0);
+          }
+          break;
+      }
+
+      if (startDate) {
+        filter.cancelledAt = { $gte: startDate };
+      }
+    }
+
+    // Search filter
+    if (search) {
+      const users = await User.find({
+        $or: [{ name: { $regex: search, $options: 'i' } }, { customerId: { $regex: search, $options: 'i' } }]
+      }).select('_id');
+
+      const userIds = users.map((u) => u._id);
+      if (userIds.length > 0) {
+        filter.userId = { $in: userIds };
+      }
+    }
+
+    // Get all cancelled bookings matching filter
+    const bookings = await Booking.find(filter).populate('userId', 'name customerId phone').sort({ cancelledAt: -1, createdAt: -1 });
+
+    // Prepare data for Excel
+    const excelData = bookings.map((booking, index) => ({
+      'S.No': index + 1,
+      'Order ID': booking.orderId || booking._id.toString().slice(-8).toUpperCase(),
+      'Customer ID': booking.userId?.customerId || 'N/A',
+      'Customer Name': booking.userId?.name || 'N/A',
+      'Customer Phone': booking.userId?.phone || 'N/A',
+      'Cancellation Reason': booking.cancellationReason || booking.cancelReason || 'N/A',
+      'Cancelled By': booking.cancelledBy || 'N/A',
+      'Vehicle Type': booking.vehicleType || 'N/A',
+      'Amount (₹)': booking.totalPrice || booking.price || 0,
+      'Pickup Address': booking.fromLocation?.address || booking.fromAddress || 'N/A',
+      'Drop Address': booking.toLocation?.address || booking.toAddress || 'N/A',
+      'Cancel Date': booking.cancelledAt
+        ? new Date(booking.cancelledAt).toLocaleDateString('en-IN')
+        : booking.createdAt
+          ? new Date(booking.createdAt).toLocaleDateString('en-IN')
+          : 'N/A',
+      'Cancel Time': booking.cancelledAt
+        ? new Date(booking.cancelledAt).toLocaleTimeString('en-IN')
+        : booking.createdAt
+          ? new Date(booking.createdAt).toLocaleTimeString('en-IN')
+          : 'N/A'
+    }));
+
+    // Handle empty data case
+    if (excelData.length === 0) {
+      excelData.push({
+        'S.No': '',
+        'Order ID': '',
+        'Customer ID': '',
+        'Customer Name': '',
+        'Customer Phone': '',
+        'Cancellation Reason': '',
+        'Cancelled By': '',
+        'Vehicle Type': '',
+        'Amount (₹)': '',
+        'Pickup Address': '',
+        'Drop Address': '',
+        'Cancel Date': '',
+        'Cancel Time': ''
+      });
+    }
+
+    // Create workbook and worksheet
+    const wb = XLSX.utils.book_new();
+    const ws = XLSX.utils.json_to_sheet(excelData);
+
+    // Add worksheet to workbook
+    XLSX.utils.book_append_sheet(wb, ws, 'Cancel Details');
+
+    // Generate buffer
+    const excelBuffer = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
+
+    // Set headers for file download
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', `attachment; filename=cancel_details_${new Date().toISOString().split('T')[0]}.xlsx`);
+
+    // Send file
+    res.send(excelBuffer);
+  } catch (error) {
+    console.error('Error exporting cancel details to Excel:', error);
+    res.status(500).json({ success: false, message: 'Failed to export cancel details', error: error.message });
   }
 };

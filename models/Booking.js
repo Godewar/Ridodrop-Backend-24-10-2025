@@ -44,6 +44,16 @@ const bookingSchema = new mongoose.Schema(
       enum: ['pending', 'accepted', 'in_progress', 'completed', 'cancelled'],
       default: 'pending'
     },
+    cancellationReason: {
+      type: String
+    },
+    cancelledBy: {
+      type: String,
+      enum: ['customer', 'driver', 'admin']
+    },
+    cancelledAt: {
+      type: Date
+    },
     tripSteps: {
       type: String
     },

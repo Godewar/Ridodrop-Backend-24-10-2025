@@ -67,6 +67,9 @@ const RiderSchema = new mongoose.Schema(
     vehicleregisterNumber: { type: String },
     walletBalance: { type: Number, default: 0 },
     isBlocked: { type: String, default: 'false' },
+    blockReason: { type: String },
+    blockedAt: { type: Date },
+    unblockedAt: { type: Date },
     status: { type: String, default: 'active', enum: ['active', 'inactive', 'blocked', 'pending', 'approved'] },
     isOnline: { type: Boolean, default: false },
     lastLocationUpdate: { type: Date },
@@ -90,7 +93,22 @@ const RiderSchema = new mongoose.Schema(
       vehicleInsurence: { type: String },
       drivingLicenseFront: { type: String },
       drivingLicenseBack: { type: String }
-    }
+    },
+    // Document approval tracking
+    documentApprovals: {
+      type: Map,
+      of: String,
+      default: {}
+    },
+    // Document rejection reasons
+    documentRejectionReasons: {
+      type: Map,
+      of: String,
+      default: {}
+    },
+    // Overall document status and rejection reason
+    documentStatus: { type: String, enum: ['Pending', 'Approved', 'Rejected'], default: 'Pending' },
+    rejectionReason: { type: String }
   },
   { timestamps: true }
 );

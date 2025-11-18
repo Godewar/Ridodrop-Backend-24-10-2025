@@ -9,13 +9,19 @@ const {
   updateUser,
   deleteUser,
   blockUser,
-  unblockUser
+  unblockUser,
+  exportCustomersToExcel,
+  exportCustomersDocuments
 } = require('../controllers/userController');
 const upload = require('../utils/multerConfig');
 const { auth } = require('../middlewares/auth');
 
 router.post('/add', upload.single('profilePhoto'), createUser);
 router.get('/me', auth, getProfile);
+
+// Export routes - MUST be before /:id route to avoid conflicts
+router.get('/dev/export/excel', exportCustomersToExcel);
+router.get('/dev/export/documents', exportCustomersDocuments);
 
 // Admin routes for user management
 router.get('/dev/all', getAllUsers);
