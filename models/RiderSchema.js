@@ -108,7 +108,9 @@ const RiderSchema = new mongoose.Schema(
     },
     // Overall document status and rejection reason
     documentStatus: { type: String, enum: ['Pending', 'Approved', 'Rejected'], default: 'Pending' },
-    rejectionReason: { type: String }
+    rejectionReason: { type: String },
+    // Expo push notification token for background notifications
+    expoPushToken: { type: String }
   },
   { timestamps: true }
 );

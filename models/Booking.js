@@ -91,7 +91,32 @@ const bookingSchema = new mongoose.Schema(
       default: 0
     },
     distanceKm: { type: String },
-    cashCollected: { type: Boolean, default: false }
+    cashCollected: { type: Boolean, default: false },
+    // Track riders who declined this booking
+    declinedBy: [{ type: mongoose.Schema.Types.ObjectId, ref: 'RaiderSchema' }],
+    declineReasons: {
+      type: Map,
+      of: String
+    },
+    broadcastedAt: { type: Date },
+    broadcastCount: { type: Number, default: 0 },
+    // Quick Fee Feature
+    quickFee: { 
+      type: Number, 
+      default: 0,
+      min: 0,
+      max: 100,
+      validate: {
+        validator: function(v) {
+          return v >= 0 && v <= 100;
+        },
+        message: props => `${props.value} is not a valid quick fee! Must be between 0 and 100.`
+      }
+    },
+    totalDriverEarnings: { 
+      type: Number, 
+      default: 0 
+    }
   },
   { timestamps: true }
 );

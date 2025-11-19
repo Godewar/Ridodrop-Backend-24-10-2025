@@ -274,7 +274,8 @@ exports.createBooking = async (req, res) => {
       bookingStatus = 'pending',
       status = 'pending',
       currentStep = '0',
-      cashCollected = false
+      cashCollected = false,
+      quickFee = 0
     } = req.body;
 
     // Validate required fields
@@ -283,6 +284,11 @@ exports.createBooking = async (req, res) => {
     }
     if (!vehicleType) {
       return res.status(400).json({ message: 'vehicleType is required' });
+    }
+
+    // Validate quickFee range
+    if (quickFee < 0 || quickFee > 100) {
+      return res.status(400).json({ message: 'quickFee must be between 0 and 100' });
     }
 
     // Handle stops array
@@ -345,6 +351,11 @@ exports.createBooking = async (req, res) => {
       console.log(`📏 Calculated booking distance: ${distanceKm} km`);
     }
 
+    // Calculate totalDriverEarnings
+    const priceValue = price ? Number(price) : 0;
+    const quickFeeValue = Number(quickFee) || 0;
+    const totalDriverEarnings = priceValue + quickFeeValue;
+
     // Build the booking object with exact structure you want
     const bookingData = {
       userId,
@@ -355,12 +366,14 @@ exports.createBooking = async (req, res) => {
       vehicleType,
       productImages,
       status,
-      price: price ? Number(price) : 0,
+      price: priceValue,
       dropLocation: processedDropLocation,
       fromAddress: fromAddress || null,
       currentStep,
       cashCollected,
-      distanceKm: distanceKm || '0'
+      distanceKm: distanceKm || '0',
+      quickFee: quickFeeValue,
+      totalDriverEarnings: totalDriverEarnings
     };
 
     console.log('Creating booking with data:', bookingData);
@@ -370,6 +383,52 @@ exports.createBooking = async (req, res) => {
     await booking.save();
 
     console.log('Booking created successfully:', booking._id);
+
+    // ✅ Mark booking as broadcasted with timestamp
+    booking.broadcastedAt = new Date();
+    booking.broadcastCount = 1;
+    await booking.save();
+
+    // ✅ AUTO-CANCEL BOOKING AFTER 5 MINUTES IF NOT ACCEPTED
+    setTimeout(async () => {
+      try {
+        const bookingCheck = await Booking.findById(booking._id);
+        
+        // If booking still pending after 5 minutes, auto-cancel
+        if (bookingCheck && bookingCheck.status === 'pending' && !bookingCheck.rider) {
+          console.log(`⏰ Auto-canceling booking ${booking._id} - no driver accepted within 5 minutes`);
+          
+          bookingCheck.status = 'cancelled';
+          bookingCheck.bookingStatus = 'Cancelled';
+          bookingCheck.cancelledBy = 'system';
+          bookingCheck.cancellationReason = 'No driver available - Auto-cancelled after 5 minutes';
+          bookingCheck.cancelledAt = new Date();
+          await bookingCheck.save();
+          
+          console.log(`✅ Booking ${booking._id} auto-cancelled due to timeout`);
+          
+          // TODO: Notify customer via push notification
+        } else {
+          console.log(`✅ Booking ${booking._id} was accepted or cancelled manually`);
+        }
+      } catch (err) {
+        console.error(`❌ Error auto-canceling booking ${booking._id}:`, err.message);
+      }
+    }, 5 * 60 * 1000); // 5 minutes
+
+    // ✅ BROADCAST NEW BOOKING TO NEARBY RIDERS VIA WEBSOCKET
+    try {
+      if (global.wsServer && typeof global.wsServer.broadcastNewBooking === 'function') {
+        console.log('🔔 Broadcasting new booking to WebSocket riders...');
+        await global.wsServer.broadcastNewBooking(booking);
+      } else {
+        console.log('⚠️ WebSocket server not available for broadcasting');
+      }
+    } catch (wsError) {
+      console.error('❌ Error broadcasting to WebSocket:', wsError.message);
+      // Don't fail the booking creation if WebSocket broadcast fails
+    }
+
     res.status(201).json(booking);
   } catch (err) {
     console.error('Booking creation error:', err);
@@ -786,19 +845,63 @@ exports.assignOrder = async (req, res) => {
       });
     }
 
-    // Fetch booking and driver
-    const booking = await Booking.findById(bookingId);
-    const driver = await Rider.findById(driverId);
+    // ✅ CHECK: Rider should not have any existing active bookings
+    console.log('🔍 Checking if rider already has active bookings...');
+    const activeBooking = await Booking.findOne({
+      rider: driverId,
+      status: { $in: ['accepted', 'in_progress', 'picked_up', 'on_way'] }
+    });
 
-    if (!booking) {
-      console.log('❌ Booking not found:', bookingId);
-      return res.status(404).json({
+    if (activeBooking) {
+      console.log('❌ Rider already has an active booking:', activeBooking._id);
+      return res.status(409).json({
         success: false,
-        message: 'Booking not found'
+        message: 'You already have an active booking. Please complete it before accepting a new one.',
+        code: 'RIDER_HAS_ACTIVE_BOOKING',
+        activeBookingId: activeBooking._id,
+        activeBookingStatus: activeBooking.status
       });
     }
 
+    console.log('✅ Rider has no active bookings, proceeding with assignment...');
+
+    // ✅ ATOMIC UPDATE: Prevent race condition
+    // Only update if booking is still pending and has no rider assigned
+    const booking = await Booking.findOneAndUpdate(
+      {
+        _id: bookingId,
+        status: 'pending',
+        $or: [{ rider: { $exists: false } }, { rider: null }, { rider: '' }]
+      },
+      {
+        $set: {
+          rider: driverId,
+          driver: driverId,
+          status: 'accepted',
+          bookingStatus: 'Ongoing',
+          riderAcceptTime: new Date()
+        }
+      },
+      { new: true }
+    );
+
+    if (!booking) {
+      console.log('❌ Booking already assigned or not found');
+      return res.status(409).json({
+        success: false,
+        message: 'Booking already assigned to another rider or not available',
+        code: 'BOOKING_TAKEN'
+      });
+    }
+
+    const driver = await Rider.findById(driverId);
     if (!driver) {
+      // Rollback booking assignment
+      await Booking.findByIdAndUpdate(bookingId, {
+        $unset: { rider: '', driver: '' },
+        status: 'pending',
+        bookingStatus: 'pending'
+      });
       console.log('❌ Driver not found:', driverId);
       return res.status(404).json({
         success: false,
@@ -806,38 +909,49 @@ exports.assignOrder = async (req, res) => {
       });
     }
 
-    console.log('✅ Found booking and driver');
+    console.log('✅ Booking assigned atomically to driver:', driverId);
 
-    // Assign driver to booking
-    booking.rider = driver._id;
-    booking.status = 'accepted';
-    booking.bookingStatus = 'Ongoing';
-    booking.riderAcceptTime = new Date();
-
-    // If the request includes status 'completed', set riderEndTime
-    if (req.body.status === 'completed') {
-      booking.status = 'completed';
-      booking.bookingStatus = 'Completed';
-      booking.riderEndTime = new Date();
+    // Notify other riders that booking was taken via WebSocket
+    try {
+      if (global.wsServer && typeof global.wsServer.broadcastToAllRiders === 'function') {
+        global.wsServer.broadcastToAllRiders({
+          type: 'booking_taken',
+          bookingId: booking._id,
+          riderId: driverId,
+          timestamp: Date.now()
+        });
+        console.log('📢 Notified other riders that booking was taken');
+      }
+    } catch (wsErr) {
+      console.log('⚠️ Could not notify via WebSocket:', wsErr.message);
     }
-
-    await booking.save();
-    console.log('✅ Booking updated successfully');
 
     // Manually fetch customer and rider details
     let customerData = null;
     if (booking.userId) {
       try {
-        const customer = await User.findById(booking.userId);
+        // Try to find user by different methods since userId can be phone, customerId, or ObjectId
+        const customer = await User.findOne({
+          $or: [
+            { phone: booking.userId },
+            { customerId: booking.userId },
+            { _id: mongoose.Types.ObjectId.isValid(booking.userId) ? booking.userId : null }
+          ]
+        });
+        
         if (customer) {
           customerData = {
             _id: customer._id,
+            customerId: customer.customerId,
             name: customer.name,
             lname: customer.lname,
             phone: customer.phone,
             email: customer.email,
             profilePhoto: customer.profilePhoto
           };
+          console.log('✅ Customer found:', customer.name, customer.phone);
+        } else {
+          console.log('⚠️ Customer not found for userId:', booking.userId);
         }
       } catch (custErr) {
         console.log('⚠️ Error fetching customer:', custErr.message);
@@ -932,6 +1046,8 @@ exports.assignOrder = async (req, res) => {
       rider: riderData,
       dropLocation: transformedDropLocation,
       price: booking.price || booking.amountPay || 0,
+      payFrom: booking.payFrom || 'Pay on Delivery',
+      amountPay: booking.amountPay,
       driverToFromKm: driverToFromKm > 0 ? driverToFromKm.toFixed(2) : null,
       fromToDropKm: fromToDropKm > 0 ? fromToDropKm.toFixed(2) : null,
       // Also add 'from' and 'to' for OrdersScreen compatibility
@@ -966,6 +1082,205 @@ exports.assignOrder = async (req, res) => {
     });
   } catch (err) {
     console.error('❌ Error in assignOrder:', err);
+    res.status(500).json({
+      success: false,
+      message: 'Internal server error',
+      error: err.message
+    });
+  }
+};
+
+// ✅ CANCEL BOOKING: Allow customer to cancel their booking
+exports.cancelBooking = async (req, res) => {
+  try {
+    const { bookingId, userId, reason } = req.body;
+
+    console.log('❌ cancelBooking called with:', { bookingId, userId, reason });
+
+    // Validate required fields
+    if (!bookingId || !userId) {
+      console.log('❌ Missing required fields');
+      return res.status(400).json({
+        success: false,
+        message: 'bookingId and userId are required'
+      });
+    }
+
+    // Find the booking
+    const booking = await Booking.findById(bookingId);
+    
+    if (!booking) {
+      console.log('❌ Booking not found:', bookingId);
+      return res.status(404).json({
+        success: false,
+        message: 'Booking not found'
+      });
+    }
+
+    // Verify the booking belongs to the user
+    if (booking.userId !== userId) {
+      console.log('❌ Unauthorized: Booking does not belong to user');
+      return res.status(403).json({
+        success: false,
+        message: 'You are not authorized to cancel this booking'
+      });
+    }
+
+    // Check if booking is already cancelled or completed
+    if (booking.status === 'cancelled' || booking.bookingStatus === 'Cancelled') {
+      console.log('❌ Booking already cancelled');
+      return res.status(400).json({
+        success: false,
+        message: 'This booking is already cancelled'
+      });
+    }
+
+    if (booking.status === 'completed' || booking.bookingStatus === 'Completed') {
+      console.log('❌ Cannot cancel completed booking');
+      return res.status(400).json({
+        success: false,
+        message: 'Cannot cancel a completed booking'
+      });
+    }
+
+    // Update booking status to cancelled
+    booking.status = 'cancelled';
+    booking.bookingStatus = 'Cancelled';
+    booking.cancellationReason = reason || 'No reason provided';
+    booking.cancelledBy = 'customer';
+    booking.cancelledAt = new Date();
+
+    await booking.save();
+
+    console.log(`✅ Booking ${bookingId} cancelled by customer ${userId}`);
+    console.log(`📋 Reason: ${booking.cancellationReason}`);
+
+    // TODO: Notify driver via WebSocket if booking was assigned
+    if (booking.driver || booking.rider) {
+      console.log('📢 Should notify driver about cancellation');
+      // if (global.wsServer) {
+      //   global.wsServer.notifyDriverCancellation(booking);
+      // }
+    }
+
+    res.json({
+      success: true,
+      message: 'Booking cancelled successfully',
+      booking: {
+        id: booking._id,
+        status: booking.status,
+        cancelledAt: booking.cancelledAt,
+        cancellationReason: booking.cancellationReason
+      }
+    });
+  } catch (err) {
+    console.error('❌ Error in cancelBooking:', err);
+    res.status(500).json({
+      success: false,
+      message: 'Internal server error',
+      error: err.message
+    });
+  }
+};
+
+// ✅ DECLINE BOOKING: Allow rider to decline/reject booking
+exports.declineBooking = async (req, res) => {
+  try {
+    const { bookingId, riderId, reason } = req.body;
+
+    console.log('🚫 declineBooking called with:', { bookingId, riderId, reason });
+
+    // Validate required fields
+    if (!bookingId || !riderId) {
+      console.log('❌ Missing required fields');
+      return res.status(400).json({
+        success: false,
+        message: 'bookingId and riderId are required'
+      });
+    }
+
+    // Verify rider exists
+    const rider = await Rider.findById(riderId);
+    if (!rider) {
+      console.log('❌ Rider not found:', riderId);
+      return res.status(404).json({
+        success: false,
+        message: 'Rider not found'
+      });
+    }
+
+    // ✅ ATOMIC UPDATE: Add rider to declinedBy array
+    // Use $addToSet to ensure rider is only added once
+    const updateData = {
+      $addToSet: { declinedBy: riderId },
+      $inc: { broadcastCount: 1 }
+    };
+
+    // Store decline reason if provided
+    if (reason) {
+      updateData.$set = {
+        [`declineReasons.${riderId}`]: reason
+      };
+    }
+
+    const booking = await Booking.findByIdAndUpdate(
+      bookingId,
+      updateData,
+      { new: true }
+    );
+
+    if (!booking) {
+      console.log('❌ Booking not found:', bookingId);
+      return res.status(404).json({
+        success: false,
+        message: 'Booking not found'
+      });
+    }
+
+    console.log(`✅ Rider ${riderId} declined booking ${bookingId}`);
+    console.log(`📊 Total declines: ${booking.declinedBy?.length || 0}`);
+
+    // ✅ AUTO-REBROADCAST: If rider declines, broadcast to other available riders
+    try {
+      if (global.wsServer && typeof global.wsServer.broadcastNewBooking === 'function') {
+        console.log('📢 Re-broadcasting booking to other riders after decline...');
+        
+        // Small delay to allow rider to be fully removed from the pool
+        setTimeout(async () => {
+          await global.wsServer.broadcastNewBooking(booking);
+          console.log(`✅ Booking ${bookingId} re-broadcasted to remaining riders`);
+        }, 500);
+      }
+    } catch (broadcastErr) {
+      console.error('❌ Error re-broadcasting after decline:', broadcastErr.message);
+    }
+
+    // ✅ AUTO-CANCEL: If too many riders decline (e.g., 5+), auto-cancel the booking
+    if (booking.declinedBy.length >= 5) {
+      console.log(`⚠️ Booking ${bookingId} declined by ${booking.declinedBy.length} riders - considering auto-cancel`);
+      
+      // Check if booking is still pending and not assigned
+      if (booking.status === 'pending' && !booking.rider) {
+        booking.status = 'cancelled';
+        booking.bookingStatus = 'Cancelled';
+        booking.cancelledBy = 'system';
+        booking.cancellationReason = 'No driver available - Multiple drivers declined';
+        booking.cancelledAt = new Date();
+        await booking.save();
+        
+        console.log(`✅ Booking ${bookingId} auto-cancelled due to multiple declines`);
+        
+        // TODO: Notify customer about cancellation
+      }
+    }
+
+    res.json({
+      success: true,
+      message: 'Booking declined successfully',
+      declineCount: booking.declinedBy?.length || 0
+    });
+  } catch (err) {
+    console.error('❌ Error in declineBooking:', err);
     res.status(500).json({
       success: false,
       message: 'Internal server error',
@@ -1061,12 +1376,20 @@ exports.getAvailableBookingsForDriver = async (req, res) => {
 
     // Find bookings that are not yet assigned to ANY rider, are pending, and match vehicle type
     // IMPORTANT: Only show bookings that have NO rider assigned (exclude accepted orders)
+    // ✅ DECLINE FILTER: Exclude bookings this rider has already declined
+    // ✅ TIME FILTER: Only show bookings created in the last 5 minutes (fresh bookings only)
+    const fiveMinutesAgo = new Date(Date.now() - 5 * 60 * 1000);
+    
     const query = {
       $or: [{ rider: { $exists: false } }, { rider: null }, { rider: '' }],
       vehicleType: normalizedVehicleType, // Use normalized vehicle type
       // Only show bookings with 'pending' status (not 'accepted' or 'in_progress')
       status: 'pending',
-      bookingStatus: { $nin: ['Completed', 'completed', 'Cancelled', 'cancelled', 'Ongoing', 'In Progress', 'Accepted'] }
+      bookingStatus: { $nin: ['Completed', 'completed', 'Cancelled', 'cancelled', 'Ongoing', 'In Progress', 'Accepted'] },
+      // Exclude bookings that this rider has already declined
+      declinedBy: { $ne: rider._id },
+      // ✅ FRESHNESS FILTER: Only show bookings created in last 5 minutes
+      createdAt: { $gte: fiveMinutesAgo }
     };
 
     console.log('🔍 Query:', JSON.stringify(query, null, 2));
@@ -1163,6 +1486,8 @@ exports.getAvailableBookingsForDriver = async (req, res) => {
           driverToFromKm: driverToFromKm.toFixed(2),
           fromToDropKm: fromToDropKm.toFixed(2),
           price: booking.amountPay,
+          quickFee: booking.quickFee || 0,
+          totalDriverEarnings: booking.totalDriverEarnings || booking.price || 0,
           status: booking.status || booking.bookingStatus
         };
       })
@@ -1264,6 +1589,18 @@ exports.getOngoingBookingForRider = async (req, res) => {
 
     console.log('🔍 Searching for ongoing booking with query:', riderQuery);
 
+    // First, count how many active bookings this rider has
+    let activeCount = 0;
+    try {
+      activeCount = await Booking.countDocuments({
+        ...riderQuery,
+        status: { $in: ['accepted', 'in_progress', 'picked_up', 'on_way'] }
+      });
+      console.log('📊 Active bookings count for this rider:', activeCount);
+    } catch (countErr) {
+      console.log('⚠️ Error counting active bookings:', countErr.message);
+    }
+
     // Find ongoing booking with better status filtering
     let booking;
     try {
@@ -1277,6 +1614,17 @@ exports.getOngoingBookingForRider = async (req, res) => {
     }
 
     console.log('📋 Found booking:', booking ? booking._id : 'None');
+    
+    // If multiple active bookings found, log warning
+    if (activeCount > 1) {
+      console.log('⚠️ WARNING: Rider has', activeCount, 'active bookings! This should not happen.');
+      // Get all active bookings for debugging
+      const allActiveBookings = await Booking.find({
+        ...riderQuery,
+        status: { $in: ['accepted', 'in_progress', 'picked_up', 'on_way'] }
+      }).select('_id bookingId status createdAt');
+      console.log('📋 All active bookings:', allActiveBookings);
+    }
 
     if (!booking) {
       console.log('⚠️ No ongoing booking found');
@@ -1360,9 +1708,13 @@ exports.getOngoingBookingForRider = async (req, res) => {
       console.log('❌ Missing coordinates for fromToDropKm calculation');
     }
 
-    // Add calculated distances and price to booking object
+    // Add calculated distances, price, and payment info to booking object
     bookingObj.fromToDropKm = fromToDropKm > 0 ? fromToDropKm.toFixed(2) : null;
     bookingObj.price = booking.price || booking.amountPay || 0;
+    bookingObj.payFrom = booking.payFrom || 'Pay on Delivery';
+    bookingObj.amountPay = booking.amountPay;
+    bookingObj.quickFee = booking.quickFee || 0;
+    bookingObj.totalDriverEarnings = booking.totalDriverEarnings || bookingObj.price;
 
     // Transform dropLocation for compatibility
     if (bookingObj.dropLocation && bookingObj.dropLocation.length > 0) {
@@ -1393,6 +1745,9 @@ exports.getOngoingBookingForRider = async (req, res) => {
       };
     }
 
+    // Add metadata about active bookings count
+    bookingObj.activeBookingsCount = activeCount;
+    
     console.log('✅ Returning ongoing booking with data:', {
       bookingId: bookingObj._id,
       status: bookingObj.status,
@@ -1401,7 +1756,8 @@ exports.getOngoingBookingForRider = async (req, res) => {
       customerPhone: bookingObj.customer?.phone || 'No phone',
       rider: bookingObj.rider,
       fromToDropKm: bookingObj.fromToDropKm,
-      price: bookingObj.price
+      price: bookingObj.price,
+      activeBookingsCount: activeCount
     });
 
     res.json(bookingObj);
@@ -1454,6 +1810,101 @@ exports.uploadBookingImage = async (req, res) => {
   }
 };
 
+exports.updateBooking = async (req, res) => {
+  try {
+    const bookingId = req.params.id;
+    const updateData = req.body;
+
+    console.log('📝 updateBooking called with:', { bookingId, updateData });
+
+    // Find the booking
+    const booking = await Booking.findById(bookingId);
+    if (!booking) {
+      return res.status(404).json({ 
+        success: false,
+        message: 'Booking not found' 
+      });
+    }
+
+    // Validate quickFee if provided
+    if (updateData.quickFee !== undefined) {
+      const quickFeeValue = Number(updateData.quickFee);
+      if (isNaN(quickFeeValue) || quickFeeValue < 0 || quickFeeValue > 100) {
+        return res.status(400).json({ 
+          success: false,
+          message: 'quickFee must be a number between 0 and 100' 
+        });
+      }
+      updateData.quickFee = quickFeeValue;
+    }
+
+    // Auto-recalculate totalDriverEarnings if price or quickFee is updated
+    const newPrice = updateData.price !== undefined ? Number(updateData.price) : booking.price || 0;
+    const newQuickFee = updateData.quickFee !== undefined ? Number(updateData.quickFee) : booking.quickFee || 0;
+    updateData.totalDriverEarnings = newPrice + newQuickFee;
+
+    console.log('💰 Recalculated earnings:', {
+      price: newPrice,
+      quickFee: newQuickFee,
+      totalDriverEarnings: updateData.totalDriverEarnings
+    });
+
+    // Update the booking
+    const updatedBooking = await Booking.findByIdAndUpdate(
+      bookingId,
+      { $set: updateData },
+      { new: true, runValidators: true }
+    );
+
+    console.log('✅ Booking updated successfully');
+
+    // 🔔 NOTIFY ABOUT TIP UPDATE VIA WEBSOCKET
+    try {
+      if (global.wsServer && updateData.quickFee !== undefined) {
+        const tipUpdateMessage = {
+          type: 'tip_added',
+          bookingId: updatedBooking._id,
+          tipAmount: updatedBooking.quickFee,
+          newTotalEarnings: updatedBooking.totalDriverEarnings,
+          newAmount: updatedBooking.amountPay,
+          timestamp: Date.now()
+        };
+        
+        console.log('💰 Tip added to booking:', updatedBooking._id, 'Amount:', updatedBooking.quickFee);
+        console.log('📨 Tip message:', JSON.stringify(tipUpdateMessage, null, 2));
+        console.log('⏰ Time:', new Date().toLocaleTimeString());
+        
+        if (updatedBooking.rider) {
+          // Booking has assigned rider - send to specific rider
+          console.log('🎯 Sending tip update to assigned rider:', updatedBooking.rider);
+          global.wsServer.sendToRider(updatedBooking.rider.toString(), tipUpdateMessage);
+          console.log('✅ Tip update sent to assigned rider');
+        } else {
+          // Pending booking - broadcast to all nearby riders who can see this booking
+          console.log('📢 Broadcasting tip update for pending booking to nearby riders');
+          await global.wsServer.broadcastTipUpdateForPendingBooking(updatedBooking, tipUpdateMessage);
+          console.log('✅ Tip update broadcasted to nearby riders');
+        }
+      }
+    } catch (wsError) {
+      console.error('❌ Error notifying about tip:', wsError.message);
+    }
+
+    res.json({ 
+      success: true,
+      message: 'Booking updated successfully',
+      booking: updatedBooking 
+    });
+  } catch (err) {
+    console.error('❌ Error in updateBooking:', err);
+    res.status(500).json({ 
+      success: false,
+      message: 'Error updating booking', 
+      error: err.message 
+    });
+  }
+};
+
 exports.updateBookingStep = async (req, res) => {
   try {
     const bookingId = req.params.id;
@@ -1478,7 +1929,12 @@ exports.completeBooking = async (req, res) => {
 
     const booking = await Booking.findByIdAndUpdate(
       bookingId,
-      { status: 'completed', currentStep: 4, bookingStatus: 'Completed' },
+      { 
+        status: 'completed', 
+        currentStep: 4, 
+        bookingStatus: 'Completed',
+        riderEndTime: new Date()
+      },
       { new: true }
     ).populate('rider', 'phone vehicleType');
 
@@ -1550,6 +2006,8 @@ exports.completeBooking = async (req, res) => {
                 driverToFromKm: driverToFromKm.toFixed(2),
                 fromToDropKm: fromToDropKm.toFixed(2),
                 price: b.amountPay,
+                quickFee: b.quickFee || 0,
+                totalDriverEarnings: b.totalDriverEarnings || b.price || 0,
                 status: b.status || b.bookingStatus
               };
             })
@@ -1895,5 +2353,97 @@ exports.exportCancelDetailsToExcel = async (req, res) => {
   } catch (error) {
     console.error('Error exporting cancel details to Excel:', error);
     res.status(500).json({ success: false, message: 'Failed to export cancel details', error: error.message });
+  }
+};
+
+// Bulk complete old/stuck bookings for a rider
+exports.bulkCompleteOldBookings = async (req, res) => {
+  try {
+    const { phone, riderId, olderThan } = req.body;
+
+    console.log('🔧 bulkCompleteOldBookings called with:', { phone, riderId, olderThan });
+
+    let riderQuery = {};
+
+    if (riderId) {
+      riderQuery.rider = riderId;
+    } else if (phone) {
+      const rider = await Rider.findOne({ phone });
+      if (!rider) {
+        return res.status(404).json({ success: false, message: 'Rider not found' });
+      }
+      riderQuery.rider = rider._id;
+      console.log('✅ Found rider:', rider._id, rider.name);
+    } else {
+      return res.status(400).json({ success: false, message: 'riderId or phone required' });
+    }
+
+    // Find all stuck bookings (older than specified hours, default 24 hours)
+    const hoursAgo = olderThan || 24;
+    const cutoffDate = new Date(Date.now() - hoursAgo * 60 * 60 * 1000);
+
+    const stuckBookings = await Booking.find({
+      ...riderQuery,
+      status: { $in: ['accepted', 'in_progress', 'picked_up', 'on_way'] },
+      updatedAt: { $lt: cutoffDate }
+    });
+
+    console.log(`📋 Found ${stuckBookings.length} stuck bookings older than ${hoursAgo} hours`);
+
+    if (stuckBookings.length === 0) {
+      return res.json({
+        success: true,
+        message: 'No stuck bookings found',
+        updated: 0,
+        bookings: []
+      });
+    }
+
+    // Log details of bookings to be completed
+    console.log('📝 Bookings to be completed:');
+    stuckBookings.forEach(booking => {
+      console.log(`  - ${booking._id} (${booking.status}) - Last updated: ${booking.updatedAt}`);
+    });
+
+    // Update all stuck bookings to completed
+    const updateResult = await Booking.updateMany(
+      {
+        ...riderQuery,
+        status: { $in: ['accepted', 'in_progress', 'picked_up', 'on_way'] },
+        updatedAt: { $lt: cutoffDate }
+      },
+      {
+        $set: {
+          status: 'completed',
+          bookingStatus: 'Completed',
+          completedAt: new Date(),
+          adminCompleted: true,
+          completionNote: `Auto-completed by bulk operation - stuck for more than ${hoursAgo} hours`
+        }
+      }
+    );
+
+    console.log('✅ Update result:', updateResult);
+
+    res.json({
+      success: true,
+      message: `Successfully completed ${updateResult.modifiedCount} stuck bookings`,
+      updated: updateResult.modifiedCount,
+      bookings: stuckBookings.map(b => ({
+        id: b._id,
+        bookingId: b.bookingId,
+        oldStatus: b.status,
+        newStatus: 'completed',
+        updatedAt: b.updatedAt
+      }))
+    });
+
+  } catch (error) {
+    console.error('❌ Error in bulkCompleteOldBookings:', error);
+    res.status(500).json({ 
+      success: false, 
+      message: 'Failed to complete old bookings', 
+      error: error.message 
+    });
   }
 };

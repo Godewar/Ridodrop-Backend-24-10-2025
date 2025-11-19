@@ -133,6 +133,44 @@ const server = http.createServer(app);
 // Initialize WebSocket server
 const wss = new WebSocketServer(server);
 
+// Make WebSocket server accessible globally
+global.wsServer = wss;
+
+// ✅ AUTO-CLEANUP JOB: Cancel stale bookings every 2 minutes
+const Booking = require('./models/Booking');
+setInterval(async () => {
+  try {
+    const fiveMinutesAgo = new Date(Date.now() - 5 * 60 * 1000);
+    
+    // Find pending bookings older than 5 minutes
+    const staleBookings = await Booking.find({
+      status: 'pending',
+      $or: [{ rider: { $exists: false } }, { rider: null }, { rider: '' }],
+      createdAt: { $lt: fiveMinutesAgo },
+      bookingStatus: { $nin: ['Completed', 'Cancelled', 'cancelled'] }
+    });
+    
+    if (staleBookings.length > 0) {
+      console.log(`🧹 Auto-cleanup: Found ${staleBookings.length} stale bookings to cancel`);
+      
+      for (const booking of staleBookings) {
+        booking.status = 'cancelled';
+        booking.bookingStatus = 'Cancelled';
+        booking.cancelledBy = 'system';
+        booking.cancellationReason = 'No driver available - Auto-cancelled';
+        booking.cancelledAt = new Date();
+        await booking.save();
+        
+        console.log(`✅ Auto-cancelled stale booking: ${booking._id}`);
+      }
+    }
+  } catch (err) {
+    console.error('❌ Error in auto-cleanup job:', err.message);
+  }
+}, 2 * 60 * 1000); // Run every 2 minutes
+
+console.log('🤖 Auto-cleanup job started - will cancel bookings older than 5 minutes');
+
 const PORT = process.env.PORT || 3000;
 
 // Start server

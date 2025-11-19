@@ -2,6 +2,7 @@ const WebSocket = require('ws');
 const jwt = require('jsonwebtoken');
 const RiderSchema = require('./models/RiderSchema');
 const Booking = require('./models/Booking');
+const { sendNewBookingNotification } = require('./utils/pushNotifications');
 
 class WebSocketServer {
     constructor(server) {
@@ -9,6 +10,7 @@ class WebSocketServer {
         this.clients = new Map(); // Map to store connected clients
         this.riderConnections = new Map(); // Map to store rider connections
         this.customerConnections = new Map(); // Map<riderId, Set<ws>>
+        this.riderLocations = new Map(); // Map<riderId, {latitude, longitude, vehicleType, lastUpdate}>
         this.initialize();
     }
 
@@ -161,25 +163,36 @@ class WebSocketServer {
 
     async handleLocationUpdate(riderId, locationData) {
         try {
+            // Validate riderId before processing
+            if (!riderId || riderId === 'undefined' || typeof riderId !== 'string' || riderId.length !== 24) {
+                console.log(`[WS] ⚠️ Invalid riderId received: ${riderId} (type: ${typeof riderId})`);
+                return;
+            }
+
             // Update rider's location in database
-            await RiderSchema.findByIdAndUpdate(riderId, {
+            const rider = await RiderSchema.findByIdAndUpdate(riderId, {
                 currentLocation: {
                     type: 'Point',
                     coordinates: [locationData.longitude, locationData.latitude]
                 },
                 lastLocationUpdate: new Date(),
                 isOnline: true
-            });
+            }, { new: true }).select('vehicleType');
 
-            (`[WS] Location update from rider ${riderId}:`, locationData);
+            console.log(`[WS] Location update from rider ${riderId}:`, locationData);
+
+            // Store location in memory for fast access
+            this.riderLocations.set(riderId, {
+                latitude: locationData.latitude,
+                longitude: locationData.longitude,
+                vehicleType: rider?.vehicleType,
+                lastUpdate: Date.now()
+            });
 
             // Broadcast location to relevant clients (admin, customers, etc.)
             this.broadcastLocationUpdate(riderId, locationData);
 
-            // Check for nearby orders
-            await this.checkNearbyOrders?.(riderId, locationData);
-
-            (`[WS] Location update for rider ${riderId}: ${locationData.latitude}, ${locationData.longitude}`);
+            console.log(`[WS] Location update for rider ${riderId}: ${locationData.latitude}, ${locationData.longitude}`);
         } catch (error) {
             console.error('Failed to handle location update:', error);
         }
@@ -328,6 +341,7 @@ class WebSocketServer {
         // Remove from clients map
         this.clients.delete(ws);
         this.riderConnections.delete(riderId);
+        this.riderLocations.delete(riderId);
 
         // Update rider status in database
         RiderSchema.findByIdAndUpdate(riderId, {
@@ -337,7 +351,7 @@ class WebSocketServer {
             console.error('Failed to update rider status on disconnect:', error);
         });
 
-        (`Rider ${riderId} disconnected`);
+        console.log(`Rider ${riderId} disconnected`);
     }
 
     calculateDistance(lat1, lon1, lat2, lon2) {
@@ -371,6 +385,258 @@ class WebSocketServer {
         this.riderConnections.forEach((ws, riderId) => {
             this.sendToClient(ws, message);
         });
+    }
+
+    // Broadcast booking update to assigned rider
+    broadcastBookingUpdate(riderId, bookingData) {
+        console.log(`[WS] 🔄 Broadcasting booking update to rider ${riderId}`);
+        
+        const message = {
+            type: 'booking_updated',
+            bookingId: bookingData.bookingId,
+            updates: bookingData.updates,
+            timestamp: Date.now()
+        };
+
+        this.sendToRider(riderId, message);
+    }
+
+    // Broadcast tip update for pending booking to nearby riders
+    async broadcastTipUpdateForPendingBooking(booking, tipMessage) {
+        try {
+            console.log(`[WS] 💸 Broadcasting tip update for pending booking ${booking._id}`);
+            
+            if (!booking.fromAddress?.latitude || !booking.fromAddress?.longitude) {
+                console.log('[WS] ⚠️ Booking missing pickup location for tip broadcast');
+                return;
+            }
+
+            const pickupLat = booking.fromAddress.latitude;
+            const pickupLon = booking.fromAddress.longitude;
+            const requiredVehicleType = this.normalizeVehicleType(booking.vehicleType);
+            const maxDistance = 5; // 5km radius - same as new booking broadcast
+
+            console.log('[WS] 🎯 Broadcasting tip update to nearby riders:', {
+                vehicleType: requiredVehicleType,
+                pickup: { lat: pickupLat, lon: pickupLon },
+                tipAmount: tipMessage.tipAmount
+            });
+
+            let notifiedRiders = 0;
+
+            // Send to nearby riders who could see this booking
+            this.riderLocations.forEach((riderData, riderId) => {
+                const riderVehicleType = this.normalizeVehicleType(riderData.vehicleType);
+                
+                // Check vehicle type match
+                if (riderVehicleType !== requiredVehicleType) {
+                    return;
+                }
+
+                // Calculate distance
+                const distance = this.getDistanceFromLatLonInKm(
+                    riderData.latitude,
+                    riderData.longitude,
+                    pickupLat,
+                    pickupLon
+                );
+
+                // Only notify if within range (same criteria as new booking)
+                if (distance <= maxDistance) {
+                    const ws = this.riderConnections.get(riderId);
+                    
+                    if (ws && ws.readyState === WebSocket.OPEN) {
+                        this.sendToClient(ws, tipMessage);
+                        notifiedRiders++;
+                        console.log(`[WS] 💰 Sent tip update to rider ${riderId} (${distance.toFixed(2)}km away)`);
+                    }
+                }
+            });
+
+            console.log(`[WS] 📊 Tip update sent to ${notifiedRiders} nearby riders`);
+            
+        } catch (error) {
+            console.error('[WS] ❌ Error broadcasting tip update:', error);
+        }
+    }
+
+    // Calculate distance between two coordinates (Haversine formula)
+    getDistanceFromLatLonInKm(lat1, lon1, lat2, lon2) {
+        const R = 6371; // Radius of earth in km
+        const dLat = ((lat2 - lat1) * Math.PI) / 180;
+        const dLon = ((lon2 - lon1) * Math.PI) / 180;
+        const a =
+            Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+            Math.cos((lat1 * Math.PI) / 180) * Math.cos((lat2 * Math.PI) / 180) *
+            Math.sin(dLon / 2) * Math.sin(dLon / 2);
+        const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+        return R * c;
+    }
+
+    // Normalize vehicle type to match booking schema
+    normalizeVehicleType(type) {
+        if (!type) return null;
+        const typeStr = type.toString().toLowerCase();
+        if (typeStr.includes('2w') || typeStr === '2wheeler' || typeStr === 'bike' || typeStr === 'motorcycle') return '2W';
+        if (typeStr.includes('3w') || typeStr === '3wheeler' || typeStr === 'auto' || typeStr === 'rickshaw') return '3W';
+        if (typeStr.includes('truck') || typeStr === '4w' || typeStr === 'pickup') return 'Truck';
+        if (type === '2W' || type === '3W' || type === 'Truck') return type;
+        return null;
+    }
+
+    // Broadcast new booking to nearby riders
+    async broadcastNewBooking(booking) {
+        try {
+            console.log(`[WS] 📢 Broadcasting new booking ${booking._id} to nearby riders`);
+            
+            if (!booking.fromAddress?.latitude || !booking.fromAddress?.longitude) {
+                console.log('[WS] ⚠️ Booking missing pickup location, skipping broadcast');
+                return;
+            }
+
+            const pickupLat = booking.fromAddress.latitude;
+            const pickupLon = booking.fromAddress.longitude;
+            const requiredVehicleType = this.normalizeVehicleType(booking.vehicleType);
+
+            console.log('[WS] 📍 Booking details:', {
+                bookingId: booking._id,
+                vehicleType: requiredVehicleType,
+                pickup: { lat: pickupLat, lon: pickupLon }
+            });
+
+            let notifiedRiders = 0;
+            const maxDistance = 5; // 5km radius
+            const ridersForPushNotification = []; // Collect riders without active WS connection
+
+            // Iterate through all online riders
+            this.riderLocations.forEach((riderData, riderId) => {
+                const riderVehicleType = this.normalizeVehicleType(riderData.vehicleType);
+                
+                // Check vehicle type match
+                if (riderVehicleType !== requiredVehicleType) {
+                    return;
+                }
+
+                // Calculate distance
+                const distance = this.getDistanceFromLatLonInKm(
+                    riderData.latitude,
+                    riderData.longitude,
+                    pickupLat,
+                    pickupLon
+                );
+
+                console.log(`[WS] 🔍 Checking rider ${riderId}: ${distance.toFixed(2)}km away, vehicle: ${riderVehicleType}`);
+
+                // Only notify if within range
+                if (distance <= maxDistance) {
+                    const ws = this.riderConnections.get(riderId);
+                    
+                    // Calculate drop distance if available
+                    let fromToDropKm = 0;
+                    const drop = booking.dropLocation?.[0];
+                    if (drop?.latitude && drop?.longitude) {
+                        fromToDropKm = this.getDistanceFromLatLonInKm(
+                            pickupLat,
+                            pickupLon,
+                            drop.latitude,
+                            drop.longitude
+                        );
+                    }
+
+                    const notificationData = {
+                        type: 'new_booking',
+                        booking: {
+                            bookingId: booking._id,
+                            from: booking.fromAddress,
+                            to: drop || {},
+                            driverToFromKm: distance.toFixed(2),
+                            fromToDropKm: fromToDropKm > 0 ? fromToDropKm.toFixed(2) : '0',
+                            price: booking.amountPay || booking.price,
+                            totalDriverEarnings: booking.totalDriverEarnings || booking.price,
+                            quickFee: booking.quickFee || 0,
+                            status: booking.status || booking.bookingStatus,
+                            vehicleType: booking.vehicleType,
+                            payFrom: booking.payFrom || 'Pay on Delivery'
+                        },
+                        timestamp: Date.now()
+                    };
+
+                    if (ws && ws.readyState === WebSocket.OPEN) {
+                        // Send via WebSocket (real-time)
+                        this.sendToClient(ws, notificationData);
+                        notifiedRiders++;
+                        console.log(`[WS] ✅ Notified rider ${riderId} via WebSocket (${distance.toFixed(2)}km away)`);
+                    } else {
+                        // Store for push notification (rider offline or app in background)
+                        ridersForPushNotification.push({
+                            riderId,
+                            distance: distance.toFixed(2),
+                            ...notificationData.booking
+                        });
+                        console.log(`[WS] 📲 Queued rider ${riderId} for push notification (${distance.toFixed(2)}km away)`);
+                    }
+                }
+            });
+
+            console.log(`[WS] 📊 Broadcast complete: ${notifiedRiders} rider(s) notified via WebSocket`);
+
+            // Send push notifications to offline/background riders
+            if (ridersForPushNotification.length > 0) {
+                try {
+                    console.log(`[Push] 📲 Sending push notifications to ${ridersForPushNotification.length} offline riders...`);
+                    
+                    // Fetch rider documents with push tokens
+                    const riderIds = ridersForPushNotification.map(r => r.riderId);
+                    const ridersWithTokens = await RiderSchema.find({
+                        _id: { $in: riderIds },
+                        expoPushToken: { $exists: true, $ne: null }
+                    }).select('_id expoPushToken');
+
+                    if (ridersWithTokens.length > 0) {
+                        const pushData = ridersWithTokens.map(rider => {
+                            const bookingData = ridersForPushNotification.find(r => r.riderId === rider._id.toString());
+                            return {
+                                expoPushToken: rider.expoPushToken,
+                                ...bookingData
+                            };
+                        });
+
+                        const pushResult = await sendNewBookingNotification(pushData, booking);
+                        console.log(`[Push] ✅ Push notifications sent to ${pushResult.sent || 0} riders`);
+                    } else {
+                        console.log('[Push] ⚠️ No riders found with valid push tokens');
+                    }
+                } catch (pushError) {
+                    console.error('[Push] ❌ Error sending push notifications:', pushError.message);
+                }
+            }
+
+            console.log(`[WS] 🎯 Total notifications: ${notifiedRiders} WebSocket + ${ridersForPushNotification.length} Push`);
+        } catch (error) {
+            console.error('[WS] ❌ Error broadcasting new booking:', error);
+        }
+    }
+
+    // Get online riders count by vehicle type
+    getOnlineRidersByVehicleType(vehicleType) {
+        const normalizedType = this.normalizeVehicleType(vehicleType);
+        let count = 0;
+        this.riderLocations.forEach((riderData) => {
+            if (this.normalizeVehicleType(riderData.vehicleType) === normalizedType) {
+                count++;
+            }
+        });
+        return count;
+    }
+
+    // Get connection stats
+    getConnectionStats() {
+        return {
+            totalRiders: this.riderConnections.size,
+            totalCustomers: Array.from(this.customerConnections.values()).reduce((sum, set) => sum + set.size, 0),
+            ridersWithLocation: this.riderLocations.size,
+            timestamp: Date.now()
+        };
     }
 }
 

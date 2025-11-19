@@ -1015,3 +1015,58 @@ exports.exportDriversDocuments = async (req, res) => {
     });
   }
 };
+
+// Save or update rider's Expo push token
+exports.savePushToken = async (req, res) => {
+  try {
+    const { phone, expoPushToken } = req.body;
+
+    if (!phone) {
+      return res.status(400).json({
+        success: false,
+        message: 'Phone number is required'
+      });
+    }
+
+    if (!expoPushToken) {
+      return res.status(400).json({
+        success: false,
+        message: 'Push token is required'
+      });
+    }
+
+    console.log(`[Push] 💾 Saving push token for rider: ${phone}`);
+
+    const rider = await Rider.findOneAndUpdate(
+      { phone },
+      { expoPushToken },
+      { new: true }
+    ).select('_id name phone expoPushToken');
+
+    if (!rider) {
+      return res.status(404).json({
+        success: false,
+        message: 'Rider not found'
+      });
+    }
+
+    console.log(`[Push] ✅ Push token saved successfully for rider: ${rider._id}`);
+
+    res.status(200).json({
+      success: true,
+      message: 'Push token saved successfully',
+      rider: {
+        id: rider._id,
+        name: rider.name,
+        phone: rider.phone
+      }
+    });
+  } catch (error) {
+    console.error('[Push] ❌ Error saving push token:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error saving push token',
+      error: error.message
+    });
+  }
+};

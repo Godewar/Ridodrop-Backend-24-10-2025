@@ -5,11 +5,14 @@ const {
   getAllOrders,
   getAvailableBookingsForDriver,
   assignOrder,
+  cancelBooking,
+  declineBooking,
   getOngoingBookingForRider,
   getBooking,
   getBookingWithRiderDetails,
   saveFromAddress,
   uploadBookingImage,
+  updateBooking,
   updateBookingStep,
   completeBooking,
   getOrderHistory,
@@ -57,9 +60,12 @@ router.post('/save-from-address', saveFromAddress);
 
 router.post('/get/bookings', getAvailableBookingsForDriver);
 router.post('/assign-order', assignOrder);
+router.post('/cancel-booking', cancelBooking); // ✅ Customer cancel booking
+router.post('/decline-booking', declineBooking); // ✅ Decline/reject booking
 router.get('/ongoing-booking', getOngoingBookingForRider);
 router.get('/booking/:id', getBooking);
 router.get('/booking-with-rider/:id', getBookingWithRiderDetails);
+router.patch('/booking/:id', updateBooking); // Update booking including quick fee
 router.patch('/update-step/:id', updateBookingStep);
 router.patch('/complete/:id', completeBooking);
 router.get('/order-history', getOrderHistory);

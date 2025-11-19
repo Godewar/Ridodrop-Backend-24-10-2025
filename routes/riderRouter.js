@@ -40,6 +40,9 @@ router.get('/all/riders', riderController.getAllRiders);
 // Update online status and location
 router.post('/update-online-status', riderController.updateOnlineStatus);
 
+// Save push notification token
+router.post('/save-push-token', riderController.savePushToken);
+
 // Block and Unblock routes
 router.patch('/:id/block', riderController.blockRider);
 router.patch('/:id/unblock', riderController.unblockRider);
