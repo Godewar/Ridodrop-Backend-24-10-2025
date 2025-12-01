@@ -2,6 +2,8 @@ const User = require('../models/User');
 const jwt = require('jsonwebtoken');
 const path = require('path');
 const XLSX = require('xlsx');
+const Referral = require('../models/Referral');
+const CustomerReferralSettings = require('../models/CustomerReferralSettings');
 
 // Get all users with filters (for admin)
 exports.getAllUsers = async (req, res) => {
@@ -105,7 +107,10 @@ exports.getProfile = async (req, res) => {
 
 exports.createUser = async (req, res) => {
   try {
-    const { name, lname, phone, gender, role } = req.body;
+    console.log('📝 Request body:', req.body);
+    console.log('📝 Request files:', req.file);
+    const { name, lname, phone, gender, role, usedReferralCode } = req.body;
+    console.log(`📝 Extracted usedReferralCode: "${usedReferralCode}"`);
 
     // Check if user already exists by phone
     const existingUser = await User.findOne({ phone });
@@ -138,6 +143,14 @@ exports.createUser = async (req, res) => {
 
     await newUser.save();
 
+    // Handle customer referral code if provided
+    if (usedReferralCode) {
+      console.log(`🔍 UsedReferralCode provided: ${usedReferralCode}`);
+      await createCustomerReferralRecord(newUser, usedReferralCode);
+    } else {
+      console.log('ℹ️ No referral code provided during registration');
+    }
+
     // Generate JWT
     const token = jwt.sign({ userId: newUser._id, role: newUser.role }, process.env.JWT_SECRET, { expiresIn: '7d' });
 
@@ -151,6 +164,66 @@ exports.createUser = async (req, res) => {
     res.status(500).json({ message: 'Internal server error' });
   }
 };
+
+// Helper function to create customer referral record
+async function createCustomerReferralRecord(referredUser, usedReferralCode) {
+  try {
+    // Find the referrer by their referral code
+    const referrer = await User.findOne({ referralCode: usedReferralCode });
+    
+    if (!referrer) {
+      console.log(`Referral code ${usedReferralCode} not found - skipping referral creation`);
+      return;
+    }
+
+    // Don't allow self-referrals
+    if (referrer._id.toString() === referredUser._id.toString()) {
+      console.log('Self-referral attempt detected - skipping');
+      return;
+    }
+
+    // Check if referral settings exist
+    let settings = await CustomerReferralSettings.findOne();
+    if (!settings) {
+      // Create default settings if none exist
+      settings = await CustomerReferralSettings.create({
+        referrerReward: 100,
+        referredDiscount: 50,
+        maxDiscountAmount: 50,
+        minBookingAmount: 100,
+        isActive: true
+      });
+    }
+
+    // Check if settings are active
+    if (!settings.isActive) {
+      console.log('Customer referral program is currently inactive');
+      return;
+    }
+
+    // Create the referral record
+    const referral = new Referral({
+      referrerId: referrer._id,
+      referrerPhone: referrer.phone,
+      referrerName: referrer.name,
+      referralCode: usedReferralCode,
+      referredUserId: referredUser._id,
+      referredUserPhone: referredUser.phone,
+      referredUserName: referredUser.name,
+      referredUserRole: 'customer',
+      referralType: 'customer',
+      vehicleType: null, // Not applicable for customer referrals
+      rewardAmount: settings.referrerReward,
+      status: 'pending',
+      campaignType: 'Customer Referral Program'
+    });
+
+    await referral.save();
+    console.log(`✅ Customer referral record created: ${referrer.customerId} → ${referredUser.customerId}`);
+  } catch (error) {
+    console.error('Error creating customer referral record:', error);
+  }
+}
 
 // Block user
 exports.blockUser = async (req, res) => {

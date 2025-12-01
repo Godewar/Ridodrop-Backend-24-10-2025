@@ -47,6 +47,7 @@ const mongoose = require('mongoose');
 const RiderSchema = new mongoose.Schema(
   {
     riderId: { type: String, unique: true, sparse: true },
+    referralCode: { type: String, unique: true, sparse: true },
     name: { type: String },
     phone: { type: String, required: true, unique: true },
 
@@ -110,12 +111,31 @@ const RiderSchema = new mongoose.Schema(
     documentStatus: { type: String, enum: ['Pending', 'Approved', 'Rejected'], default: 'Pending' },
     rejectionReason: { type: String },
     // Expo push notification token for background notifications
-    expoPushToken: { type: String }
+    expoPushToken: { type: String },
+    // Rating system fields
+    averageRating: { type: Number, default: 0, min: 0, max: 5 },
+    totalReviews: { type: Number, default: 0 },
+    ratingBreakdown: {
+      oneStar: { type: Number, default: 0 },
+      twoStar: { type: Number, default: 0 },
+      threeStar: { type: Number, default: 0 },
+      fourStar: { type: Number, default: 0 },
+      fiveStar: { type: Number, default: 0 }
+    },
+    // Preferred area for receiving priority orders
+    preferredArea: {
+      enabled: { type: Boolean, default: false },
+      name: { type: String },
+      latitude: { type: Number },
+      longitude: { type: Number },
+      address: { type: String },
+      updatedAt: { type: Date }
+    }
   },
   { timestamps: true }
 );
 
-// Pre-save hook to generate riderId
+// Pre-save hook to generate riderId and referralCode
 RiderSchema.pre('save', async function (next) {
   if (!this.riderId && this.isNew) {
     try {
@@ -127,6 +147,13 @@ RiderSchema.pre('save', async function (next) {
       console.error('❌ Error generating riderId:', error);
     }
   }
+  
+  // Generate referral code if not exists
+  if (!this.referralCode && this.isNew) {
+    this.referralCode = `REF${Date.now()}${Math.floor(Math.random() * 10000)}`;
+    console.log('✅ Generated referralCode:', this.referralCode);
+  }
+  
   next();
 });
 

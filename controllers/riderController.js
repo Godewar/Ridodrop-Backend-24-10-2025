@@ -147,7 +147,7 @@ const XLSX = require('xlsx');
 
 exports.createRider = async (req, res) => {
   try {
-    const { phone } = req.body;
+    const { phone, usedReferralCode } = req.body;
 
     if (!phone) {
       return res.status(400).json({ error: 'Phone number is required' });
@@ -175,6 +175,16 @@ exports.createRider = async (req, res) => {
     const rider = new Rider(riderData);
     await rider.save();
 
+    // Create referral record if rider used someone's referral code
+    if (usedReferralCode) {
+      try {
+        await createReferralRecord(usedReferralCode, rider);
+      } catch (refErr) {
+        console.error('⚠️ Failed to create referral record:', refErr.message);
+        // Don't fail registration if referral creation fails
+      }
+    }
+
     const token = jwt.sign({ phone, userId: rider._id }, process.env.JWT_SECRET, {
       expiresIn: '30d' // Token valid for 30 days
     });
@@ -185,6 +195,66 @@ exports.createRider = async (req, res) => {
     res.status(400).json({ error: err.message });
   }
 };
+
+// Helper function to create referral record
+async function createReferralRecord(referralCode, referredRider) {
+  const User = require('../models/User');
+  const Referral = require('../models/Referral');
+  const ReferralCampaign = require('../models/ReferralCampaign');
+
+  // Find referrer by code (could be User or Rider)
+  let referrer = await User.findOne({ referralCode });
+  let referrerModel = 'User';
+  
+  if (!referrer) {
+    referrer = await Rider.findOne({ referralCode });
+    referrerModel = 'Rider';
+  }
+
+  if (!referrer) {
+    console.log('⚠️ Invalid referral code:', referralCode);
+    throw new Error('Invalid referral code');
+  }
+
+  // Get active campaign for vehicle type
+  const campaign = await ReferralCampaign.findOne({
+    vehicleType: referredRider.vehicleType,
+    isActive: true
+  });
+
+  if (!campaign) {
+    console.log('⚠️ No active campaign found for vehicle type:', referredRider.vehicleType);
+    throw new Error('No active campaign for this vehicle type');
+  }
+
+  // Create referral record
+  const newReferral = new Referral({
+    referrerId: referrer._id,
+    referrerPhone: referrer.phone,
+    referrerName: referrer.name || 'N/A',
+    referralCode: referralCode,
+    referredUserId: referredRider._id,
+    referredUserPhone: referredRider.phone,
+    referredUserName: referredRider.name || 'N/A',
+    referredUserRole: 'rider',
+    vehicleType: referredRider.vehicleType,
+    rewardAmount: campaign.maxReward || 0,
+    campaignType: campaign.name || 'Default',
+    status: 'pending',
+    totalRidesCompleted: 0,
+    activationDate: new Date(),
+    milestonesCompleted: []
+  });
+
+  await newReferral.save();
+  console.log('✅ Referral record created:', newReferral._id);
+  console.log('   Referrer:', referrer.name, '(' + referrer.phone + ')');
+  console.log('   Referred:', referredRider.name, '(' + referredRider.phone + ')');
+  console.log('   Vehicle:', referredRider.vehicleType);
+  console.log('   Max Reward: ₹' + campaign.maxReward);
+  
+  return newReferral;
+}
 
 exports.updateRider = async (req, res) => {
   try {
@@ -1066,6 +1136,106 @@ exports.savePushToken = async (req, res) => {
     res.status(500).json({
       success: false,
       message: 'Error saving push token',
+      error: error.message
+    });
+  }
+};
+
+// Save or update rider's preferred area
+exports.setPreferredArea = async (req, res) => {
+  try {
+    const { phone, enabled, name, latitude, longitude, address } = req.body;
+
+    if (!phone) {
+      return res.status(400).json({
+        success: false,
+        message: 'Phone number is required'
+      });
+    }
+
+    console.log(`[Preferred Area] 📍 Setting preferred area for rider: ${phone}`, {
+      enabled,
+      name,
+      latitude,
+      longitude
+    });
+
+    const updateData = {
+      'preferredArea.enabled': enabled || false,
+      'preferredArea.updatedAt': new Date()
+    };
+
+    if (name) updateData['preferredArea.name'] = name;
+    if (latitude !== undefined) updateData['preferredArea.latitude'] = latitude;
+    if (longitude !== undefined) updateData['preferredArea.longitude'] = longitude;
+    if (address) updateData['preferredArea.address'] = address;
+
+    const rider = await Rider.findOneAndUpdate(
+      { phone },
+      { $set: updateData },
+      { new: true }
+    ).select('_id name phone preferredArea');
+
+    if (!rider) {
+      return res.status(404).json({
+        success: false,
+        message: 'Rider not found'
+      });
+    }
+
+    console.log(`[Preferred Area] ✅ Preferred area ${enabled ? 'enabled' : 'disabled'} for rider: ${rider._id}`);
+
+    res.status(200).json({
+      success: true,
+      message: 'Preferred area updated successfully',
+      preferredArea: rider.preferredArea
+    });
+  } catch (error) {
+    console.error('[Preferred Area] ❌ Error setting preferred area:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error setting preferred area',
+      error: error.message
+    });
+  }
+};
+
+// Get rider's preferred area
+exports.getPreferredArea = async (req, res) => {
+  try {
+    const { phone } = req.query;
+
+    if (!phone) {
+      return res.status(400).json({
+        success: false,
+        message: 'Phone number is required'
+      });
+    }
+
+    const rider = await Rider.findOne({ phone }).select('preferredArea');
+
+    if (!rider) {
+      return res.status(404).json({
+        success: false,
+        message: 'Rider not found'
+      });
+    }
+
+    res.status(200).json({
+      success: true,
+      preferredArea: rider.preferredArea || {
+        enabled: false,
+        name: null,
+        latitude: null,
+        longitude: null,
+        address: null
+      }
+    });
+  } catch (error) {
+    console.error('[Preferred Area] ❌ Error getting preferred area:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error getting preferred area',
       error: error.message
     });
   }

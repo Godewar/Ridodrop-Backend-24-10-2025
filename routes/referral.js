@@ -32,4 +32,7 @@ router.post('/create', referralController.createReferral);
 // Update referral status
 router.patch('/:id/status', referralController.updateReferralStatus);
 
+// Manual milestone credit by admin
+router.post('/manual-credit', referralController.manualCreditMilestone);
+
 module.exports = router;

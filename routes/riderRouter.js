@@ -33,15 +33,19 @@ router.put(
 router.get('/export/excel', riderController.exportDriversToExcel);
 router.get('/export/documents', riderController.exportDriversDocuments);
 
-router.get('/get/rider', riderController.getRiderById);
-router.get('/:id', riderController.getRiderById); // Support fetching by ID in URL params
-router.get('/all/riders', riderController.getAllRiders);
+// Preferred area routes - MUST be before /:id route
+router.post('/preferred-area', riderController.setPreferredArea);
+router.get('/preferred-area', riderController.getPreferredArea);
 
 // Update online status and location
 router.post('/update-online-status', riderController.updateOnlineStatus);
 
 // Save push notification token
 router.post('/save-push-token', riderController.savePushToken);
+
+router.get('/get/rider', riderController.getRiderById);
+router.get('/:id', riderController.getRiderById); // Support fetching by ID in URL params
+router.get('/all/riders', riderController.getAllRiders);
 
 // Block and Unblock routes
 router.patch('/:id/block', riderController.blockRider);

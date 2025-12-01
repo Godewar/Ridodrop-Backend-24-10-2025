@@ -9,6 +9,7 @@ const cookieParser = require('cookie-parser');
 const app = express();
 
 app.use('/uploads', express.static('uploads'));
+app.use('/public', express.static('public'));
 
 // Middleware
 app.use(
@@ -88,6 +89,7 @@ app.use('/api/v1', require('./routes/auth'));
 app.use('/api/v1', require('./routes/users'));
 app.use('/api/v1', require('./routes/bookings'));
 app.use('/api/v1/wallet', require('./routes/wallet'));
+app.use('/api/v1/rider-wallet', require('./routes/riderWallet'));
 app.use('/api/v1/riders', require('./routes/riderRouter'));
 app.use('/api/v1/notification', require('./routes/notification'));
 app.use('/api/v1/prices', require('./routes/prices'));
@@ -95,6 +97,10 @@ app.use('/api/v1/services', require('./routes/services'));
 app.use('/api/v1/coupons', require('./routes/coupons'));
 app.use('/api/v1/vehicles', require('./routes/vehicles'));
 app.use('/api/v1/referrals', require('./routes/referral'));
+app.use('/api/v1/customer-referral-settings', require('./routes/customerReferralSettings'));
+app.use('/api/v1/trip-sharing', require('./routes/tripSharing'));
+app.use('/api/v1/settings', require('./routes/settings'));
+app.use('/api/v1', require('./routes/tickets'));
 
 // ...existing code...
 
@@ -106,6 +112,11 @@ app.get('/', (req, res) => {
     timestamp: new Date().toISOString(),
     version: '1.0.0'
   });
+});
+
+// Serve trip tracking page
+app.get('/track-trip/:token', (req, res) => {
+  res.sendFile(__dirname + '/public/track-trip.html');
 });
 
 // Test endpoint for diagnostics
@@ -132,6 +143,8 @@ const server = http.createServer(app);
 
 // Initialize WebSocket server
 const wss = new WebSocketServer(server);
+// Make WebSocket server globally available for review notifications
+global.webSocketServer = wss;
 
 // Make WebSocket server accessible globally
 global.wsServer = wss;

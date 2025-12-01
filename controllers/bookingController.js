@@ -2,7 +2,267 @@ const mongoose = require('mongoose');
 const Booking = require('../models/Booking');
 const Rider = require('../models/RiderSchema');
 const User = require('../models/User');
+const Settings = require('../models/Settings');
 const XLSX = require('xlsx');
+const cloudinary = require('../config/cloudinary');
+const { uploadToCloudinary, deleteFromCloudinary } = require('../utils/cloudinaryHelper');
+
+// Bulk cancel all active bookings by mobile number
+exports.bulkCancelBookingsByMobile = async (req, res) => {
+  try {
+    const { mobile } = req.params;
+    const { reason } = req.body;
+    
+    console.log('🚫 Bulk canceling bookings for mobile:', mobile);
+    
+    if (!mobile) {
+      return res.status(400).json({
+        success: false,
+        message: 'Mobile number is required'
+      });
+    }
+
+    // Find user by mobile number
+    const user = await User.findOne({ phone: mobile });
+    if (!user) {
+      console.log('❌ User not found for mobile:', mobile);
+      return res.status(404).json({
+        success: false,
+        message: 'User not found with this mobile number',
+        mobile: mobile
+      });
+    }
+
+    console.log('✅ Found user:', {
+      id: user._id,
+      name: user.name,
+      customerId: user.customerId
+    });
+
+    // Find all active bookings for this user
+    const activeBookings = await Booking.find({
+      $or: [
+        { userId: user.phone },
+        { userId: user.customerId },
+        { userId: user._id.toString() }
+      ],
+      status: { $in: ['pending', 'accepted', 'in_progress', 'picked_up', 'on_way'] },
+      bookingStatus: { $nin: ['Completed', 'completed', 'Cancelled', 'cancelled'] }
+    });
+
+    if (activeBookings.length === 0) {
+      return res.json({
+        success: true,
+        message: 'No active bookings found to cancel',
+        mobile: mobile,
+        cancelledCount: 0,
+        cancelledBookings: []
+      });
+    }
+
+    console.log(`📋 Found ${activeBookings.length} active bookings to cancel`);
+
+    // Cancel all active bookings
+    const cancelledBookings = [];
+    const cancellationReason = reason || 'Bulk cancellation requested';
+
+    for (const booking of activeBookings) {
+      booking.status = 'cancelled';
+      booking.bookingStatus = 'Cancelled';
+      booking.cancellationReason = cancellationReason;
+      booking.cancelledBy = 'admin';
+      booking.cancelledAt = new Date();
+      
+      await booking.save();
+      
+      cancelledBookings.push({
+        _id: booking._id,
+        oldStatus: booking.status === 'cancelled' ? 'pending' : booking.status, // Show previous status
+        newStatus: 'cancelled',
+        cancellationReason: cancellationReason,
+        cancelledAt: booking.cancelledAt
+      });
+      
+      console.log(`✅ Cancelled booking: ${booking._id}`);
+    }
+
+    res.json({
+      success: true,
+      message: `Successfully cancelled ${cancelledBookings.length} bookings for mobile ${mobile}`,
+      mobile: mobile,
+      userId: user._id,
+      userDetails: {
+        name: user.name,
+        lname: user.lname,
+        customerId: user.customerId,
+        phone: user.phone
+      },
+      cancelledCount: cancelledBookings.length,
+      cancelledBookings: cancelledBookings
+    });
+
+  } catch (error) {
+    console.error('❌ Error bulk canceling bookings:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error canceling bookings',
+      error: error.message,
+      mobile: req.params.mobile
+    });
+  }
+};
+
+// Check for active/pending bookings by mobile number
+exports.checkActiveBookingsByMobile = async (req, res) => {
+  try {
+    const { mobile } = req.params;
+    
+    console.log('📱 Checking active bookings for mobile:', mobile);
+    
+    if (!mobile) {
+      return res.status(400).json({
+        success: false,
+        message: 'Mobile number is required'
+      });
+    }
+
+    // Find user by mobile number
+    const user = await User.findOne({ phone: mobile });
+    if (!user) {
+      console.log('❌ User not found for mobile:', mobile);
+      return res.status(404).json({
+        success: false,
+        message: 'User not found with this mobile number',
+        mobile: mobile,
+        activeBookings: []
+      });
+    }
+
+    console.log('✅ Found user:', {
+      id: user._id,
+      name: user.name,
+      customerId: user.customerId
+    });
+
+    // Search for active bookings using multiple user identifier fields
+    const activeBookings = await Booking.find({
+      $or: [
+        { userId: user.phone },
+        { userId: user.customerId },
+        { userId: user._id.toString() }
+      ],
+      status: { $in: ['pending', 'accepted', 'in_progress', 'picked_up', 'on_way'] },
+      bookingStatus: { $nin: ['Completed', 'completed', 'Cancelled', 'cancelled'] }
+    })
+    .populate('driver', 'name phone vehicleType riderId')
+    .sort({ createdAt: -1 });
+
+    console.log(`📋 Found ${activeBookings.length} active bookings`);
+
+    // Transform bookings for response
+    const transformedBookings = await Promise.all(
+      activeBookings.map(async (booking) => {
+        let riderData = null;
+        
+        // Get rider data from driver field or rider field
+        if (booking.driver) {
+          riderData = {
+            _id: booking.driver._id,
+            name: booking.driver.name,
+            phone: booking.driver.phone,
+            vehicleType: booking.driver.vehicleType,
+            riderId: booking.driver.riderId
+          };
+        } else if (booking.rider) {
+          // Try to find rider by string identifier
+          try {
+            const rider = await Rider.findOne({
+              $or: [
+                { phone: booking.rider },
+                { riderId: booking.rider },
+                { _id: mongoose.Types.ObjectId.isValid(booking.rider) ? booking.rider : null }
+              ]
+            });
+            
+            if (rider) {
+              riderData = {
+                _id: rider._id,
+                name: rider.name,
+                phone: rider.phone,
+                vehicleType: rider.vehicleType,
+                riderId: rider.riderId
+              };
+            }
+          } catch (err) {
+            console.log('⚠️ Error fetching rider:', err.message);
+          }
+        }
+
+        return {
+          _id: booking._id,
+          status: booking.status,
+          bookingStatus: booking.bookingStatus,
+          vehicleType: booking.vehicleType,
+          price: booking.price || booking.amountPay,
+          amountPay: booking.amountPay,
+          payFrom: booking.payFrom,
+          quickFee: booking.quickFee || 0,
+          totalDriverEarnings: booking.totalDriverEarnings,
+          fromAddress: booking.fromAddress,
+          dropLocation: booking.dropLocation,
+          currentStep: booking.currentStep,
+          createdAt: booking.createdAt,
+          updatedAt: booking.updatedAt,
+          riderAcceptTime: booking.riderAcceptTime,
+          rider: riderData,
+          driver: riderData, // For compatibility
+          customer: {
+            _id: user._id,
+            name: user.name,
+            lname: user.lname,
+            phone: user.phone,
+            customerId: user.customerId
+          }
+        };
+      })
+    );
+
+    // Determine response message
+    let message;
+    if (activeBookings.length === 0) {
+      message = `No active bookings found for mobile ${mobile}`;
+    } else if (activeBookings.length === 1) {
+      message = `Found 1 active booking for mobile ${mobile}`;
+    } else {
+      message = `Found ${activeBookings.length} active bookings for mobile ${mobile}`;
+    }
+
+    res.json({
+      success: true,
+      message: message,
+      mobile: mobile,
+      userId: user._id,
+      userDetails: {
+        name: user.name,
+        lname: user.lname,
+        customerId: user.customerId,
+        phone: user.phone
+      },
+      activeBookingsCount: activeBookings.length,
+      activeBookings: transformedBookings
+    });
+
+  } catch (error) {
+    console.error('❌ Error checking active bookings:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error checking active bookings',
+      error: error.message,
+      mobile: req.params.mobile,
+      activeBookings: []
+    });
+  }
+};
 
 // Get all orders/bookings with filters
 exports.getAllOrders = async (req, res) => {
@@ -286,6 +546,48 @@ exports.createBooking = async (req, res) => {
       return res.status(400).json({ message: 'vehicleType is required' });
     }
 
+    // 🚫 CHECK FOR EXISTING PENDING BOOKINGS ONLY
+    // Allow multiple active bookings (accepted, in_progress, etc.) but block if pending exists
+    console.log('🔍 Checking for existing pending bookings for userId:', userId);
+    
+    // Check for pending bookings only (waiting for rider acceptance)
+    const existingPendingBookings = await Booking.find({
+      $or: [
+        { userId: userId },
+        { userId: userId.toString() }
+      ],
+      status: 'pending', // Only block if there's a pending booking
+      bookingStatus: { $nin: ['Completed', 'completed', 'Cancelled', 'cancelled'] }
+    });
+
+    if (existingPendingBookings.length > 0) {
+      console.log(`❌ User ${userId} already has ${existingPendingBookings.length} pending booking(s)`);
+      console.log('Pending bookings:', existingPendingBookings.map(b => ({
+        id: b._id,
+        status: b.status,
+        bookingStatus: b.bookingStatus,
+        createdAt: b.createdAt
+      })));
+
+      return res.status(409).json({
+        success: false,
+        message: `You have a pending booking waiting for rider acceptance. Please wait for it to be accepted or cancel it before creating a new booking.`,
+        error: 'PENDING_BOOKING_EXISTS',
+        pendingBookings: existingPendingBookings.map(booking => ({
+          _id: booking._id,
+          status: booking.status,
+          bookingStatus: booking.bookingStatus,
+          vehicleType: booking.vehicleType,
+          createdAt: booking.createdAt,
+          fromAddress: booking.fromAddress,
+          dropLocation: booking.dropLocation
+        })),
+        pendingBookingsCount: existingPendingBookings.length
+      });
+    }
+
+    console.log('✅ No pending bookings found, proceeding with new booking creation');
+
     // Validate quickFee range
     if (quickFee < 0 || quickFee > 100) {
       return res.status(400).json({ message: 'quickFee must be between 0 and 100' });
@@ -351,19 +653,79 @@ exports.createBooking = async (req, res) => {
       console.log(`📏 Calculated booking distance: ${distanceKm} km`);
     }
 
-    // Calculate totalDriverEarnings
+    // Calculate fee breakdown using Settings model
     const priceValue = price ? Number(price) : 0;
     const quickFeeValue = Number(quickFee) || 0;
-    const totalDriverEarnings = priceValue + quickFeeValue;
+    
+    console.log('💰 Calculating fee breakdown for:', { priceValue, vehicleType, quickFeeValue });
+    
+    // Get active settings for fee calculation
+    let settings = await Settings.findOne({ isActive: true }).sort({ effectiveFrom: -1 });
+    
+    // If no settings found, create default settings
+    if (!settings) {
+      console.log('⚠️ No active settings found, creating default settings');
+      settings = new Settings({
+        platformFees: {
+          '2W': 8,
+          '3W': 10,
+          'Truck': 12,
+          'E-Loader': 11
+        },
+        gstPercentage: 0,
+        isActive: true
+      });
+      await settings.save();
+      console.log('✅ Default settings created');
+    }
+    
+    // Calculate fee breakdown
+    const feeBreakdown = settings.calculateFeeBreakdown(priceValue, vehicleType);
+    
+    // Add quick fee to rider earnings (quick fee goes directly to rider)
+    feeBreakdown.riderEarnings += quickFeeValue;
+    feeBreakdown.displayBreakdown.finalAmount = priceValue; // Don't include quick fee in customer total
+    
+    console.log('📊 Fee breakdown calculated:', {
+      totalAmount: feeBreakdown.totalAmount,
+      vehicleType: feeBreakdown.vehicleType,
+      platformFee: feeBreakdown.platformFee,
+      gstAmount: feeBreakdown.gstAmount,
+      riderEarnings: feeBreakdown.riderEarnings,
+      quickFee: quickFeeValue
+    });
 
-    // Build the booking object with exact structure you want
+    // Calculate legacy totalDriverEarnings for backward compatibility
+    const totalDriverEarnings = feeBreakdown.riderEarnings;
+
+    // Determine payment method and status based on payFrom
+    let paymentMethod = 'cash';
+    let paymentStatus = 'pending';
+    let paymentCompletedAt = null;
+    
+    const payFromLower = (payFrom || '').toLowerCase();
+    if (payFromLower.includes('online')) {
+      paymentMethod = 'online';
+      paymentStatus = 'completed'; // Online payments are pre-paid
+      paymentCompletedAt = new Date();
+      console.log('💳 Online payment detected - marking as completed');
+    } else {
+      paymentMethod = 'cash';
+      paymentStatus = 'pending'; // Cash payments are pending until collected
+      console.log('💵 Cash payment detected - status pending');
+    }
+
+    // Build the booking object with fee breakdown
     const bookingData = {
       userId,
-      amountPay: amountPay || '0',
+      amountPay: amountPay || priceValue.toString(),
       bookingStatus,
       payFrom: payFrom || 'drop',
+      paymentMethod,
+      paymentStatus,
+      paymentCompletedAt,
       stops: stopsArray,
-      vehicleType,
+      vehicleType: feeBreakdown.vehicleTypeUsed || vehicleType,
       productImages,
       status,
       price: priceValue,
@@ -373,7 +735,14 @@ exports.createBooking = async (req, res) => {
       cashCollected,
       distanceKm: distanceKm || '0',
       quickFee: quickFeeValue,
-      totalDriverEarnings: totalDriverEarnings
+      totalDriverEarnings: totalDriverEarnings,
+      
+      // New fee breakdown structure
+      feeBreakdown: feeBreakdown,
+      
+      // Legacy fields for backward compatibility
+      baseFare: feeBreakdown.displayBreakdown.baseFare.toString(),
+      additionalCharges: (feeBreakdown.displayBreakdown.distanceCharge + feeBreakdown.displayBreakdown.serviceTax).toString()
     };
 
     console.log('Creating booking with data:', bookingData);
@@ -491,11 +860,44 @@ exports.getBooking = async (req, res) => {
 exports.saveFromAddress = async (req, res) => {
   try {
     const { userId, address, latitude, longitude, house, receiverName, receiverMobile, tag } = req.body;
-    // if (!address || latitude == null || longitude == null) {
-    //   return res.status(400).json({ message: 'Address, latitude, and longitude are required.' });
-    // }
+    
+    if (!userId) {
+      return res.status(400).json({ message: 'userId is required' });
+    }
 
+    // 🚫 CHECK FOR EXISTING PENDING BOOKINGS ONLY BEFORE SAVING FROM ADDRESS
+    // Allow multiple active bookings (accepted, in_progress, etc.) but block if pending exists
+    console.log('🔍 Checking for existing pending bookings before saving from address for userId:', userId);
+    
+    const existingPendingBookings = await Booking.find({
+      $or: [
+        { userId: userId },
+        { userId: userId.toString() }
+      ],
+      status: 'pending', // Only block if there's a pending booking
+      bookingStatus: { $nin: ['Completed', 'completed', 'Cancelled', 'cancelled'] }
+    });
+
+    if (existingPendingBookings.length > 0) {
+      console.log(`❌ User ${userId} already has ${existingPendingBookings.length} pending booking(s) - cannot save from address`);
+      
+      return res.status(409).json({
+        success: false,
+        message: `You have a pending booking waiting for rider acceptance. Please wait for it to be accepted or cancel it before creating a new booking.`,
+        error: 'PENDING_BOOKING_EXISTS',
+        pendingBookings: existingPendingBookings.map(booking => ({
+          _id: booking._id,
+          status: booking.status,
+          bookingStatus: booking.bookingStatus,
+          createdAt: booking.createdAt
+        })),
+        pendingBookingsCount: existingPendingBookings.length
+      });
+    }
+
+    console.log('✅ No pending bookings found, proceeding with saveFromAddress');
     console.log(req.body, 'Sssss2uuuuuuuuu');
+    
     const booking = new Booking({
       userId,
       fromAddress: {
@@ -911,6 +1313,47 @@ exports.assignOrder = async (req, res) => {
 
     console.log('✅ Booking assigned atomically to driver:', driverId);
 
+    // ✅ GENERATE INVOICE PDF when rider accepts booking
+    try {
+      console.log('🧾 Generating invoice for booking:', booking._id);
+      const { generateInvoicePDF } = require('../utils/invoiceGenerator');
+      
+      // Get customer data for invoice
+      let customerData = null;
+      if (booking.userId) {
+        try {
+          customerData = await User.findOne({
+            $or: [
+              { phone: booking.userId },
+              { customerId: booking.userId },
+              { _id: mongoose.Types.ObjectId.isValid(booking.userId) ? booking.userId : null }
+            ]
+          });
+        } catch (custErr) {
+          console.log('⚠️ Error fetching customer for invoice:', custErr.message);
+        }
+      }
+
+      // Generate invoice PDF
+      const invoiceDetails = await generateInvoicePDF(booking, customerData, driver);
+      
+      // Update booking with invoice information
+      await Booking.findByIdAndUpdate(booking._id, {
+        invoiceNumber: invoiceDetails.invoiceNumber,
+        invoiceUrl: invoiceDetails.invoiceUrl,
+        invoiceCloudinaryId: invoiceDetails.invoiceCloudinaryId,
+        invoiceGeneratedAt: invoiceDetails.generatedAt,
+        invoiceAmount: invoiceDetails.totalAmount
+      });
+
+      console.log('✅ Invoice generated successfully:', invoiceDetails.invoiceNumber);
+      console.log('📄 Invoice URL:', invoiceDetails.invoiceUrl);
+    } catch (invoiceError) {
+      console.error('❌ Failed to generate invoice (continuing without invoice):', invoiceError.message);
+      // Don't fail the booking assignment if invoice generation fails
+      // Invoice can be generated later if needed
+    }
+
     // Notify other riders that booking was taken via WebSocket
     try {
       if (global.wsServer && typeof global.wsServer.broadcastToAllRiders === 'function') {
@@ -1042,6 +1485,8 @@ exports.assignOrder = async (req, res) => {
     // Create full booking object with populated data
     const fullBooking = {
       ...booking.toObject(),
+      _id: booking._id,
+      bookingId: booking._id.toString(), // Ensure bookingId is always present
       customer: customerData,
       rider: riderData,
       dropLocation: transformedDropLocation,
@@ -1333,6 +1778,32 @@ exports.getAvailableBookingsForDriver = async (req, res) => {
         bookings: []
       });
     }
+
+    // 🚫 CHECK: Rider should not see new bookings if they already have an active booking
+    console.log('🔍 Checking if rider already has active bookings...');
+    const activeBooking = await Booking.findOne({
+      $or: [
+        { rider: rider._id.toString() },
+        { rider: rider.phone },
+        { driver: rider._id }
+      ],
+      status: { $in: ['accepted', 'in_progress', 'picked_up', 'on_way'] }
+    });
+
+    if (activeBooking) {
+      console.log('❌ Rider already has an active booking:', activeBooking._id);
+      return res.status(409).json({
+        success: false,
+        message: 'You already have an active booking. Please complete it before viewing new requests.',
+        code: 'RIDER_HAS_ACTIVE_BOOKING',
+        activeBookingId: activeBooking._id,
+        activeBookingStatus: activeBooking.status,
+        bookings: [],
+        hasActiveBooking: true
+      });
+    }
+
+    console.log('✅ Rider has no active bookings, fetching available bookings...');
     const driverVehicleType = rider.vehicleType;
 
     console.log('🚗 Driver vehicle type (raw):', driverVehicleType);
@@ -1485,9 +1956,13 @@ exports.getAvailableBookingsForDriver = async (req, res) => {
           to: drop,
           driverToFromKm: driverToFromKm.toFixed(2),
           fromToDropKm: fromToDropKm.toFixed(2),
-          price: booking.amountPay,
+          price: booking.price || Number(booking.amountPay) || 0,
+          totalFare: booking.price || Number(booking.amountPay) || 0,
+          amountPay: booking.amountPay || booking.price?.toString() || '0',
           quickFee: booking.quickFee || 0,
-          totalDriverEarnings: booking.totalDriverEarnings || booking.price || 0,
+          totalDriverEarnings: booking.totalDriverEarnings || 0,
+          platformFee: booking.feeBreakdown?.platformFee || 0,
+          gst: booking.feeBreakdown?.gstAmount || 0,
           status: booking.status || booking.bookingStatus
         };
       })
@@ -1785,28 +2260,173 @@ exports.getBookingWithRiderDetails = async (req, res) => {
 exports.uploadBookingImage = async (req, res) => {
   try {
     const bookingId = req.params.id;
-    const imagePath = req.file.path; // multer adds this
+    
+    if (!req.file) {
+      return res.status(400).json({ message: 'No image file provided' });
+    }
 
-    console.log(bookingId, imagePath, 'data from images');
-    // Find booking and push image path
+    console.log('📸 Uploading image for booking:', bookingId);
+    
+    // Find booking first
     const booking = await Booking.findById(bookingId);
-    if (!booking) return res.status(404).json({ message: 'Booking not found' });
+    if (!booking) {
+      return res.status(404).json({ message: 'Booking not found' });
+    }
 
-    // Ensure productImages array exists
-    if (!Array.isArray(booking.productImages)) {
-      booking.productImages = [];
+    // Upload to Cloudinary using helper function
+    try {
+      const result = await uploadToCloudinary(
+        req.file.buffer,
+        `ridodrop/bookings/${bookingId}`,
+        {
+          public_id: `${bookingId}_${Date.now()}`, // Unique public ID
+          overwrite: false // Don't overwrite existing images
+        }
+      );
+
+      const imageUrl = result.secure_url;
+      const publicId = result.public_id;
+
+      console.log('✅ Image uploaded to Cloudinary:', imageUrl);
+
+      // Ensure productImages array exists
+      if (!Array.isArray(booking.productImages)) {
+        booking.productImages = [];
+      }
+
+      // Create image metadata for response
+      const imageData = {
+        url: imageUrl,
+        publicId: publicId,
+        originalName: req.file.originalname,
+        size: req.file.size,
+        uploadedAt: new Date(),
+        format: result.format,
+        width: result.width,
+        height: result.height
+      };
+
+      // Check if image already exists (by URL - schema expects strings)
+      const existingImage = booking.productImages.find(img => img === imageUrl);
+
+      if (!existingImage) {
+        // Save only the URL string to match schema
+        booking.productImages.push(imageUrl);
+        await booking.save();
+        
+        console.log('💾 Image URL saved to booking:', imageUrl);
+        
+        res.json({ 
+          success: true,
+          message: 'Image uploaded and saved successfully', 
+          imagePath: imageUrl,
+          imageData: imageData,
+          cloudinaryResult: {
+            publicId: publicId,
+            format: result.format,
+            width: result.width,
+            height: result.height,
+            bytes: result.bytes
+          }
+        });
+      } else {
+        res.json({ 
+          success: true,
+          message: 'Image already exists', 
+          imagePath: existingImage,
+          imageData: { url: existingImage }
+        });
+      }
+    } catch (cloudinaryError) {
+      console.error('❌ Cloudinary upload error:', cloudinaryError);
+      res.status(500).json({ 
+        success: false,
+        message: 'Failed to upload image to cloud storage', 
+        error: cloudinaryError.message 
+      });
     }
-    // Only add if not already present
-    if (!booking.productImages.includes(imagePath)) {
-      booking.productImages.push(imagePath);
-      await booking.save();
-      console.log(imagePath, 'Image path saved to booking');
-      res.json({ message: 'Image uploaded and saved', imagePath, booking });
-    } else {
-      res.json({ message: 'Image already uploaded', imagePath, booking });
-    }
+
   } catch (err) {
-    res.status(500).json({ message: 'Error uploading image', error: err.message });
+    console.error('❌ Upload booking image error:', err);
+    res.status(500).json({ 
+      success: false,
+      message: 'Error processing image upload', 
+      error: err.message 
+    });
+  }
+};
+
+// Delete booking image from Cloudinary
+exports.deleteBookingImage = async (req, res) => {
+  try {
+    const { bookingId, imageId } = req.params;
+    
+    console.log('🗑️ Deleting image for booking:', bookingId, 'imageId:', imageId);
+    
+    // Find booking
+    const booking = await Booking.findById(bookingId);
+    if (!booking) {
+      return res.status(404).json({ message: 'Booking not found' });
+    }
+
+    // Find image in productImages array
+    let imageToDelete = null;
+    let imageIndex = -1;
+
+    if (Array.isArray(booking.productImages)) {
+      booking.productImages.forEach((img, index) => {
+        if (typeof img === 'object' && img.publicId === imageId) {
+          imageToDelete = img;
+          imageIndex = index;
+        } else if (typeof img === 'string' && img.includes(imageId)) {
+          imageToDelete = { publicId: imageId, url: img };
+          imageIndex = index;
+        }
+      });
+    }
+
+    if (!imageToDelete) {
+      return res.status(404).json({ message: 'Image not found in booking' });
+    }
+
+    try {
+      // Delete from Cloudinary
+      const deleteResult = await deleteFromCloudinary(imageToDelete.publicId);
+      console.log('✅ Image deleted from Cloudinary:', deleteResult);
+
+      // Remove from booking array
+      booking.productImages.splice(imageIndex, 1);
+      await booking.save();
+
+      res.json({
+        success: true,
+        message: 'Image deleted successfully',
+        deletedImage: imageToDelete,
+        cloudinaryResult: deleteResult
+      });
+
+    } catch (cloudinaryError) {
+      console.error('❌ Error deleting from Cloudinary:', cloudinaryError);
+      
+      // Still remove from database even if Cloudinary delete fails
+      booking.productImages.splice(imageIndex, 1);
+      await booking.save();
+      
+      res.json({
+        success: true,
+        message: 'Image removed from booking (Cloudinary deletion failed)',
+        warning: 'Image may still exist in cloud storage',
+        error: cloudinaryError.message
+      });
+    }
+
+  } catch (err) {
+    console.error('❌ Delete booking image error:', err);
+    res.status(500).json({
+      success: false,
+      message: 'Error deleting image',
+      error: err.message
+    });
   }
 };
 
@@ -1909,10 +2529,75 @@ exports.updateBookingStep = async (req, res) => {
   try {
     const bookingId = req.params.id;
 
-    console.log(req.params, 'eddede');
-    const { currentStep } = req.body;
-    const booking = await Booking.findByIdAndUpdate(bookingId, { currentStep }, { new: true });
+    console.log(req.params, 'updating booking step');
+    const { currentStep, currentDropIndex, tripState } = req.body;
+    
+    const updateData = { currentStep };
+    
+    // Include currentDropIndex if provided
+    if (currentDropIndex !== undefined) {
+      updateData.currentDropIndex = currentDropIndex;
+      console.log('📍 Updating currentDropIndex:', currentDropIndex);
+    }
+    
+    // Include tripState if provided
+    if (tripState) {
+      updateData.tripState = tripState;
+      console.log('🚦 Updating tripState:', tripState);
+    }
+    
+    const booking = await Booking.findByIdAndUpdate(bookingId, updateData, { new: true });
     if (!booking) return res.status(404).json({ message: 'Booking not found' });
+    
+    console.log('✅ Booking state updated:', {
+      bookingId,
+      currentStep: booking.currentStep,
+      currentDropIndex: booking.currentDropIndex,
+      tripState: booking.tripState
+    });
+    
+    // Send WebSocket notifications to customer for arrival events
+    if (global.webSocketServer && booking.rider) {
+      const riderId = booking.rider;
+      
+      // Step 1: Rider arrived at pickup location
+      if (currentStep === '1' || currentStep === 1) {
+        console.log('🎯 Rider arrived at pickup - notifying customer');
+        global.webSocketServer.broadcastToCustomers(riderId, {
+          type: 'rider_arrived_at_pickup',
+          riderId: riderId,
+          bookingId: bookingId,
+          timestamp: Date.now(),
+          message: 'Your rider has arrived at the pickup location'
+        });
+      }
+      
+      // Step 2: Started trip (picked up goods)
+      if (currentStep === '2' || currentStep === 2) {
+        console.log('🚀 Trip started - notifying customer');
+        global.webSocketServer.broadcastToCustomers(riderId, {
+          type: 'trip_started',
+          riderId: riderId,
+          bookingId: bookingId,
+          timestamp: Date.now(),
+          message: 'Your rider has picked up the goods and started the trip'
+        });
+      }
+      
+      // Step 3: Rider arrived at drop location
+      if (currentStep === '3' || currentStep === 3) {
+        console.log('🎯 Rider arrived at drop location - notifying customer');
+        global.webSocketServer.broadcastToCustomers(riderId, {
+          type: 'rider_arrived_at_drop',
+          riderId: riderId,
+          bookingId: bookingId,
+          currentDropIndex: currentDropIndex,
+          timestamp: Date.now(),
+          message: 'Your rider has arrived at the drop location'
+        });
+      }
+    }
+    
     res.json({ message: 'Step updated', booking });
   } catch (err) {
     res.status(500).json({ message: 'Error updating step', error: err.message });
@@ -1936,11 +2621,88 @@ exports.completeBooking = async (req, res) => {
         riderEndTime: new Date()
       },
       { new: true }
-    ).populate('rider', 'phone vehicleType');
+    );
 
     if (!booking) return res.status(404).json({ message: 'Booking not found' });
 
     console.log('✅ Booking completed successfully');
+    console.log('📊 Booking details:', {
+      _id: booking._id,
+      riderField: booking.rider,
+      hasRider: !!booking.rider,
+      hasFeeBreakdown: !!booking.feeBreakdown,
+      platformFee: booking.feeBreakdown?.platformFee,
+      vehicleType: booking.vehicleType
+    });
+    
+    // Send WebSocket notification to customer that delivery is complete
+    if (global.webSocketServer && booking.rider) {
+      console.log('📦 Delivery completed - notifying customer');
+      global.webSocketServer.broadcastToCustomers(booking.rider, {
+        type: 'delivery_completed',
+        riderId: booking.rider,
+        bookingId: bookingId,
+        timestamp: Date.now(),
+        message: 'Your delivery has been completed successfully'
+      });
+    }
+
+    // Deduct platform fee from rider's wallet based on vehicle type
+    if (booking.rider && booking.feeBreakdown && booking.feeBreakdown.platformFee && booking.feeBreakdown.platformFee > 0) {
+      try {
+        const Rider = require('../models/RiderSchema');
+        const Transaction = require('../models/Transaction');
+        
+        // rider field is stored as string (rider ID), not a reference
+        const riderId = booking.rider;
+        const platformFee = booking.feeBreakdown.platformFee;
+        const platformFeePercentage = booking.feeBreakdown.platformFeePercentage || 0;
+        const vehicleType = booking.feeBreakdown.vehicleTypeUsed || booking.vehicleType || 'N/A';
+        
+        console.log(`💰 Deducting platform fee: ₹${platformFee} (${platformFeePercentage}% for ${vehicleType}) from rider ${riderId}`);
+        
+        // Find rider and update wallet balance
+        const rider = await Rider.findById(riderId);
+        if (rider) {
+          console.log(`📊 Current rider wallet balance: ₹${rider.walletBalance || 0}`);
+          
+          // Initialize wallet balance if not exists
+          if (rider.walletBalance === null || rider.walletBalance === undefined) {
+            rider.walletBalance = 0;
+          }
+          
+          // Deduct platform fee (allow negative balance)
+          const previousBalance = rider.walletBalance;
+          rider.walletBalance = (rider.walletBalance || 0) - platformFee;
+          await rider.save();
+          
+          // Create transaction record
+          await Transaction.create({
+            userId: riderId,
+            amount: platformFee,
+            type: 'debit',
+            bookingId: booking._id,
+            description: `Platform fee - ${platformFeePercentage}% for ${vehicleType} (Booking #${booking.bookingId || booking._id.toString().slice(-6)})`,
+          });
+          
+          console.log(`✅ Platform fee deducted successfully!`);
+          console.log(`   Previous balance: ₹${previousBalance}`);
+          console.log(`   Platform fee: ₹${platformFee}`);
+          console.log(`   New balance: ₹${rider.walletBalance}`);
+        } else {
+          console.error('⚠️ Rider not found for platform fee deduction');
+        }
+      } catch (feeError) {
+        console.error('⚠️ Error deducting platform fee:', feeError.message);
+        console.error(feeError.stack);
+        // Don't fail the booking completion if fee deduction fails
+      }
+    } else {
+      console.log('ℹ️ No platform fee to deduct or rider not assigned');
+      console.log('   Rider:', booking.rider);
+      console.log('   Has feeBreakdown:', !!booking.feeBreakdown);
+      console.log('   Platform fee:', booking.feeBreakdown?.platformFee);
+    }
 
     // If rider location provided, fetch next available bookings within 5km
     let nextBookings = [];
@@ -2018,6 +2780,225 @@ exports.completeBooking = async (req, res) => {
       } catch (nextBookingsErr) {
         console.error('⚠️ Error fetching next bookings:', nextBookingsErr.message);
         // Don't fail the completion if next bookings fetch fails
+      }
+    }
+
+    // ✅ CHECK IF RIDER IS REFERRED AND TRACK MILESTONE PROGRESS
+    if (booking.rider) {
+      try {
+        const Referral = require('../models/Referral');
+        const ReferralCampaign = require('../models/ReferralCampaign');
+        const Rider = require('../models/RiderSchema');
+        const User = require('../models/User');
+        const Transaction = require('../models/Transaction');
+
+        // Get rider details
+        const riderDetails = await Rider.findById(booking.rider);
+        if (!riderDetails) {
+          console.log('⚠️ Rider not found for milestone tracking');
+        } else {
+          console.log('🎯 Checking referral milestones for rider:', riderDetails.phone);
+
+          // Find active referral record for this rider
+          const referral = await Referral.findOne({
+            referredUserPhone: riderDetails.phone,
+            vehicleType: booking.vehicleType,
+            status: { $in: ['pending', 'completed'] }
+          });
+
+          if (referral) {
+            console.log('📊 Found referral record:', referral._id);
+
+            // Increment ride count
+            referral.totalRidesCompleted = (referral.totalRidesCompleted || 0) + 1;
+            referral.lastRideCompletedAt = new Date();
+
+            console.log(`   Total rides completed: ${referral.totalRidesCompleted}`);
+
+            // Get campaign milestones
+            const campaign = await ReferralCampaign.findOne({
+              vehicleType: booking.vehicleType,
+              isActive: true
+            });
+
+            if (campaign && campaign.milestones) {
+              console.log(`   Campaign: ${campaign.name} (${campaign.milestones.length} milestones)`);
+
+              // Check each milestone
+              for (const milestone of campaign.milestones) {
+                // Skip if already completed
+                const alreadyCompleted = referral.milestonesCompleted.find(m => m.milestoneId === milestone.id);
+
+                if (!alreadyCompleted && referral.totalRidesCompleted >= milestone.rides) {
+                  // Check deadline if exists
+                  const daysSinceActivation = Math.floor(
+                    (Date.now() - new Date(referral.activationDate).getTime()) / (1000 * 60 * 60 * 24)
+                  );
+
+                  const withinDeadline = !milestone.daysToComplete || daysSinceActivation <= milestone.daysToComplete;
+
+                  if (withinDeadline && milestone.reward > 0) {
+                    console.log(`💰 Milestone reached: ${milestone.title} (${milestone.rides} rides)`);
+                    console.log(`   Reward: ₹${milestone.reward}`);
+
+                    // Find referrer (could be User or Rider)
+                    let referrer = await User.findById(referral.referrerId);
+                    let isRiderReferrer = false;
+
+                    if (!referrer) {
+                      referrer = await Rider.findById(referral.referrerId);
+                      isRiderReferrer = true;
+                    }
+
+                    if (referrer) {
+                      // Credit reward to referrer's wallet
+                      referrer.walletBalance = (referrer.walletBalance || 0) + milestone.reward;
+                      await referrer.save();
+
+                      console.log(`✅ Credited ₹${milestone.reward} to ${referrer.name}'s wallet`);
+                      console.log(`   New wallet balance: ₹${referrer.walletBalance}`);
+
+                      // Create transaction record
+                      const txn = await Transaction.create({
+                        userId: referrer._id,
+                        amount: milestone.reward,
+                        type: 'credit',
+                        bookingId: booking._id,
+                        description: `Referral Reward: ${milestone.title} - ${milestone.rides} rides milestone (${riderDetails.name})`
+                      });
+
+                      // Mark milestone as completed
+                      referral.milestonesCompleted.push({
+                        milestoneId: milestone.id,
+                        title: milestone.title,
+                        rides: milestone.rides,
+                        reward: milestone.reward,
+                        completedAt: new Date(),
+                        rewardCredited: true,
+                        transactionId: txn._id.toString()
+                      });
+
+                      console.log(`🎉 Milestone ${milestone.title} completed and credited!`);
+                    } else {
+                      console.error('⚠️ Referrer not found');
+                    }
+                  } else if (!withinDeadline) {
+                    console.log(`⏰ Milestone ${milestone.title} deadline passed (${milestone.daysToComplete} days)`);
+                  }
+                }
+              }
+
+              // Check if all milestones completed
+              const totalMilestones = campaign.milestones.filter(m => m.reward > 0).length;
+              if (referral.milestonesCompleted.length >= totalMilestones) {
+                referral.status = 'completed';
+                console.log('🎉 All milestones completed! Referral marked as completed.');
+              }
+            } else {
+              console.log('⚠️ No active campaign found for vehicle type:', booking.vehicleType);
+            }
+
+            await referral.save();
+            console.log('✅ Referral record updated successfully');
+          } else {
+            console.log('ℹ️ No active referral found for this rider');
+          }
+        }
+      } catch (milestoneErr) {
+        console.error('⚠️ Error tracking milestone:', milestoneErr.message);
+        console.error(milestoneErr.stack);
+        // Don't fail booking completion if milestone tracking fails
+      }
+    }
+
+    // ✅ CHECK IF CUSTOMER IS REFERRED AND PROCESS FIRST BOOKING REFERRAL REWARD
+    if (booking.userId) {
+      try {
+        const User = require('../models/User');
+        const Referral = require('../models/Referral');
+        const CustomerReferralSettings = require('../models/CustomerReferralSettings');
+        const Transaction = require('../models/Transaction');
+
+        // Get customer details
+        const customer = await User.findById(booking.userId);
+        if (!customer) {
+          console.log('⚠️ Customer not found for referral tracking');
+        } else {
+          // Check if this is customer's first completed booking
+          if (!customer.firstBookingCompleted) {
+            console.log('🎯 This is customer\'s first booking:', customer.customerId);
+
+            // Mark first booking as completed
+            customer.firstBookingCompleted = true;
+            await customer.save();
+
+            // Find referral record where this customer is the referred one
+            const referral = await Referral.findOne({
+              referredUserId: customer._id,
+              referralType: 'customer',
+              status: 'pending'
+            });
+
+            if (referral) {
+              console.log('📊 Found customer referral record:', referral._id);
+
+              // Get referral settings
+              const settings = await CustomerReferralSettings.findOne();
+              if (!settings || !settings.isActive) {
+                console.log('⚠️ Customer referral program is inactive');
+              } else {
+                console.log('💰 Processing customer referral rewards...');
+
+                // Find the referrer
+                const referrer = await User.findById(referral.referrerId);
+                if (!referrer) {
+                  console.log('⚠️ Referrer not found');
+                } else {
+                  // Check minimum booking amount
+                  const bookingAmount = booking.price || 0;
+                  if (bookingAmount >= settings.minBookingAmount) {
+                    console.log(`✅ Booking amount (₹${bookingAmount}) meets minimum (₹${settings.minBookingAmount})`);
+
+                    // Credit reward to referrer
+                    const rewardAmount = settings.referrerReward;
+                    referrer.walletBalance = (referrer.walletBalance || 0) + rewardAmount;
+                    await referrer.save();
+
+                    console.log(`✅ Credited ₹${rewardAmount} to referrer ${referrer.customerId}`);
+                    console.log(`   New wallet balance: ₹${referrer.walletBalance}`);
+
+                    // Create transaction for referrer
+                    await Transaction.create({
+                      userId: referrer._id,
+                      amount: rewardAmount,
+                      type: 'credit',
+                      bookingId: booking._id,
+                      description: `Customer Referral Reward - ${customer.name} completed first booking`
+                    });
+
+                    // Update referral record
+                    referral.status = 'completed';
+                    referral.rewardCredited = true;
+                    referral.completedAt = new Date();
+                    await referral.save();
+
+                    console.log('🎉 Customer referral reward processed successfully!');
+                  } else {
+                    console.log(`⚠️ Booking amount (₹${bookingAmount}) below minimum (₹${settings.minBookingAmount})`);
+                  }
+                }
+              }
+            } else {
+              console.log('ℹ️ No pending customer referral found for this customer');
+            }
+          } else {
+            console.log('ℹ️ Not first booking for customer:', customer.customerId);
+          }
+        }
+      } catch (customerReferralErr) {
+        console.error('⚠️ Error processing customer referral:', customerReferralErr.message);
+        console.error(customerReferralErr.stack);
+        // Don't fail booking completion if customer referral processing fails
       }
     }
 
@@ -2103,6 +3084,36 @@ exports.saveDropLocation = async (req, res) => {
       return res.status(400).json({ message: 'userId is required' });
     }
 
+    // 🚫 CHECK FOR EXISTING ACTIVE/PENDING BOOKINGS BEFORE SAVING DROP LOCATION
+    console.log('🔍 Checking for existing active bookings before saving drop location for userId:', userId);
+    
+    const existingActiveBookings = await Booking.find({
+      $or: [
+        { userId: userId },
+        { userId: userId.toString() }
+      ],
+      status: { $in: ['pending', 'accepted', 'in_progress', 'picked_up', 'on_way'] },
+      bookingStatus: { $nin: ['Completed', 'completed', 'Cancelled', 'cancelled'] }
+    });
+
+    if (existingActiveBookings.length > 0) {
+      console.log(`❌ User ${userId} already has ${existingActiveBookings.length} active booking(s) - cannot save drop location`);
+      
+      return res.status(409).json({
+        success: false,
+        message: `You already have ${existingActiveBookings.length} active booking(s). Please complete or cancel your existing booking before creating a new one.`,
+        error: 'ACTIVE_BOOKING_EXISTS',
+        activeBookings: existingActiveBookings.map(booking => ({
+          _id: booking._id,
+          status: booking.status,
+          bookingStatus: booking.bookingStatus,
+          createdAt: booking.createdAt
+        })),
+        activeBookingsCount: existingActiveBookings.length
+      });
+    }
+
+    console.log('✅ No active bookings found, proceeding with saveDropLocation');
     console.log(req.body, 'SaveDropLocation data');
 
     // Create booking with dropLocation data following SaveFromAddress pattern
@@ -2444,6 +3455,372 @@ exports.bulkCompleteOldBookings = async (req, res) => {
       success: false, 
       message: 'Failed to complete old bookings', 
       error: error.message 
+    });
+  }
+};
+
+// Upload pickup image
+exports.uploadPickupImage = async (req, res) => {
+  try {
+    const bookingId = req.params.id;
+    
+    if (!req.file) {
+      return res.status(400).json({ message: 'No image file provided' });
+    }
+
+    console.log('📸 Uploading pickup image for booking:', bookingId);
+    
+    // Find booking first
+    const booking = await Booking.findById(bookingId);
+    if (!booking) {
+      return res.status(404).json({ message: 'Booking not found' });
+    }
+
+    // Upload to Cloudinary using helper function
+    try {
+      const { uploadToCloudinary } = require('../utils/cloudinaryHelper');
+      const result = await uploadToCloudinary(
+        req.file.buffer,
+        `ridodrop/bookings/${bookingId}/pickup`,
+        {
+          public_id: `${bookingId}_pickup_${Date.now()}`,
+          overwrite: false
+        }
+      );
+
+      const imageUrl = result.secure_url;
+      const publicId = result.public_id;
+
+      console.log('✅ Pickup image uploaded to Cloudinary:', imageUrl);
+
+      // Ensure pickupImages array exists
+      if (!Array.isArray(booking.pickupImages)) {
+        booking.pickupImages = [];
+      }
+
+      // Check if image already exists
+      const existingImage = booking.pickupImages.find(img => img === imageUrl);
+
+      if (!existingImage) {
+        // Save only the URL string to match schema
+        booking.pickupImages.push(imageUrl);
+        await booking.save();
+        
+        console.log('💾 Pickup image URL saved to booking:', imageUrl);
+        
+        res.json({ 
+          success: true,
+          message: 'Pickup image uploaded and saved successfully', 
+          imagePath: imageUrl,
+          imageData: {
+            url: imageUrl,
+            publicId: publicId,
+            originalName: req.file.originalname,
+            size: req.file.size,
+            uploadedAt: new Date(),
+            format: result.format,
+            width: result.width,
+            height: result.height,
+            type: 'pickup'
+          },
+          cloudinaryResult: {
+            publicId: publicId,
+            format: result.format,
+            width: result.width,
+            height: result.height,
+            bytes: result.bytes
+          }
+        });
+      } else {
+        res.json({ 
+          success: true,
+          message: 'Pickup image already exists', 
+          imagePath: existingImage,
+          imageData: { url: existingImage, type: 'pickup' }
+        });
+      }
+    } catch (cloudinaryError) {
+      console.error('❌ Cloudinary upload error:', cloudinaryError);
+      res.status(500).json({ 
+        success: false,
+        message: 'Failed to upload pickup image to cloud storage', 
+        error: cloudinaryError.message 
+      });
+    }
+
+  } catch (err) {
+    console.error('❌ Upload pickup image error:', err);
+    res.status(500).json({ 
+      success: false,
+      message: 'Error processing pickup image upload', 
+      error: err.message 
+    });
+  }
+};
+
+// Upload drop image
+exports.uploadDropImage = async (req, res) => {
+  try {
+    const bookingId = req.params.id;
+    
+    if (!req.file) {
+      return res.status(400).json({ message: 'No image file provided' });
+    }
+
+    console.log('📸 Uploading drop image for booking:', bookingId);
+    
+    // Find booking first
+    const booking = await Booking.findById(bookingId);
+    if (!booking) {
+      return res.status(404).json({ message: 'Booking not found' });
+    }
+
+    // Upload to Cloudinary using helper function
+    try {
+      const { uploadToCloudinary } = require('../utils/cloudinaryHelper');
+      const result = await uploadToCloudinary(
+        req.file.buffer,
+        `ridodrop/bookings/${bookingId}/drop`,
+        {
+          public_id: `${bookingId}_drop_${Date.now()}`,
+          overwrite: false
+        }
+      );
+
+      const imageUrl = result.secure_url;
+      const publicId = result.public_id;
+
+      console.log('✅ Drop image uploaded to Cloudinary:', imageUrl);
+
+      // Ensure dropImages array exists
+      if (!Array.isArray(booking.dropImages)) {
+        booking.dropImages = [];
+      }
+
+      // Check if image already exists
+      const existingImage = booking.dropImages.find(img => img === imageUrl);
+
+      if (!existingImage) {
+        // Save only the URL string to match schema
+        booking.dropImages.push(imageUrl);
+        await booking.save();
+        
+        console.log('💾 Drop image URL saved to booking:', imageUrl);
+        
+        res.json({ 
+          success: true,
+          message: 'Drop image uploaded and saved successfully', 
+          imagePath: imageUrl,
+          imageData: {
+            url: imageUrl,
+            publicId: publicId,
+            originalName: req.file.originalname,
+            size: req.file.size,
+            uploadedAt: new Date(),
+            format: result.format,
+            width: result.width,
+            height: result.height,
+            type: 'drop'
+          },
+          cloudinaryResult: {
+            publicId: publicId,
+            format: result.format,
+            width: result.width,
+            height: result.height,
+            bytes: result.bytes
+          }
+        });
+      } else {
+        res.json({ 
+          success: true,
+          message: 'Drop image already exists', 
+          imagePath: existingImage,
+          imageData: { url: existingImage, type: 'drop' }
+        });
+      }
+    } catch (cloudinaryError) {
+      console.error('❌ Cloudinary upload error:', cloudinaryError);
+      res.status(500).json({ 
+        success: false,
+        message: 'Failed to upload drop image to cloud storage', 
+        error: cloudinaryError.message 
+      });
+    }
+
+  } catch (err) {
+    console.error('❌ Upload drop image error:', err);
+    res.status(500).json({ 
+      success: false,
+      message: 'Error processing drop image upload', 
+      error: err.message 
+    });
+  }
+};
+
+// Get booking images (all types)
+exports.getBookingImages = async (req, res) => {
+  try {
+    const bookingId = req.params.id;
+    
+    console.log('📸 Fetching images for booking:', bookingId);
+    
+    // Find booking
+    const booking = await Booking.findById(bookingId);
+    if (!booking) {
+      return res.status(404).json({ 
+        success: false,
+        message: 'Booking not found' 
+      });
+    }
+
+    // Get all image arrays
+    const pickupImages = booking.pickupImages || [];
+    const dropImages = booking.dropImages || [];
+    const productImages = booking.productImages || []; // Backward compatibility
+    
+    console.log(`📸 Found pickup: ${pickupImages.length}, drop: ${dropImages.length}, product: ${productImages.length} images`);
+    
+    res.json({ 
+      success: true,
+      pickupImages: pickupImages,
+      dropImages: dropImages,
+      productImages: productImages, // Backward compatibility
+      counts: {
+        pickup: pickupImages.length,
+        drop: dropImages.length,
+        product: productImages.length,
+        total: pickupImages.length + dropImages.length + productImages.length
+      },
+      bookingId: bookingId
+    });
+
+  } catch (err) {
+    console.error('❌ Get booking images error:', err);
+    res.status(500).json({ 
+      success: false,
+      message: 'Error fetching images', 
+      error: err.message 
+    });
+  }
+};
+
+// Download invoice PDF for a booking
+exports.downloadInvoice = async (req, res) => {
+  try {
+    const bookingId = req.params.id;
+    
+    console.log('📄 Download invoice request for booking:', bookingId);
+    
+    // Find booking
+    const booking = await Booking.findById(bookingId);
+    if (!booking) {
+      console.log('❌ Booking not found:', bookingId);
+      return res.status(404).json({ 
+        success: false,
+        message: 'Booking not found' 
+      });
+    }
+
+    // Check if invoice exists
+    if (!booking.invoiceUrl || !booking.invoiceNumber) {
+      console.log('❌ Invoice not generated for booking:', bookingId);
+      
+      // Try to generate invoice if booking is accepted/completed
+      if (booking.status === 'accepted' || booking.status === 'completed' || booking.status === 'in_progress') {
+        try {
+          console.log('🔄 Attempting to generate invoice for existing booking...');
+          const { generateInvoicePDF } = require('../utils/invoiceGenerator');
+          
+          // Get customer data
+          let customerData = null;
+          if (booking.userId) {
+            customerData = await User.findOne({
+              $or: [
+                { phone: booking.userId },
+                { customerId: booking.userId },
+                { _id: mongoose.Types.ObjectId.isValid(booking.userId) ? booking.userId : null }
+              ]
+            });
+          }
+
+          // Get rider data
+          let riderData = null;
+          if (booking.driver) {
+            riderData = await Rider.findById(booking.driver);
+          } else if (booking.rider) {
+            riderData = await Rider.findOne({
+              $or: [
+                { phone: booking.rider },
+                { riderId: booking.rider },
+                { _id: mongoose.Types.ObjectId.isValid(booking.rider) ? booking.rider : null }
+              ]
+            });
+          }
+
+          // Generate invoice
+          const invoiceDetails = await generateInvoicePDF(booking, customerData, riderData);
+          
+          // Update booking with invoice information
+          await Booking.findByIdAndUpdate(booking._id, {
+            invoiceNumber: invoiceDetails.invoiceNumber,
+            invoiceUrl: invoiceDetails.invoiceUrl,
+            invoiceCloudinaryId: invoiceDetails.invoiceCloudinaryId,
+            invoiceGeneratedAt: invoiceDetails.generatedAt,
+            invoiceAmount: invoiceDetails.totalAmount
+          });
+
+          console.log('✅ Invoice generated successfully:', invoiceDetails.invoiceNumber);
+          
+          // Redirect to the generated invoice
+          return res.redirect(invoiceDetails.invoiceUrl);
+          
+        } catch (generateError) {
+          console.error('❌ Failed to generate invoice:', generateError.message);
+          return res.status(500).json({
+            success: false,
+            message: 'Invoice not available and could not be generated',
+            error: generateError.message
+          });
+        }
+      } else {
+        return res.status(400).json({ 
+          success: false,
+          message: 'Invoice not available. Booking must be accepted by a rider first.' 
+        });
+      }
+    }
+
+    console.log('✅ Invoice found, serving PDF from:', booking.invoiceUrl);
+    
+    // Fetch PDF from Cloudinary and serve with correct headers
+    const https = require('https');
+    const http = require('http');
+    
+    const protocol = booking.invoiceUrl.startsWith('https:') ? https : http;
+    
+    protocol.get(booking.invoiceUrl, (cloudinaryResponse) => {
+      // Set correct PDF headers
+      res.setHeader('Content-Type', 'application/pdf');
+      res.setHeader('Content-Disposition', `inline; filename="invoice_${booking.invoiceNumber || 'ridodrop'}.pdf"`);
+      res.setHeader('Cache-Control', 'public, max-age=3600');
+      
+      // Pipe the PDF content directly to response
+      cloudinaryResponse.pipe(res);
+    }).on('error', (error) => {
+      console.error('❌ Error fetching PDF from Cloudinary:', error);
+      res.status(500).json({
+        success: false,
+        message: 'Error fetching invoice file',
+        error: error.message
+      });
+    });
+
+  } catch (err) {
+    console.error('❌ Download invoice error:', err);
+    res.status(500).json({ 
+      success: false,
+      message: 'Error downloading invoice', 
+      error: err.message 
     });
   }
 };

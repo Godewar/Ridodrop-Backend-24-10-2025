@@ -1,0 +1,558 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Track Your Trip - Ridodrop</title>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.2/socket.io.js"></script>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', sans-serif;
+        }
+
+        body {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
+        }
+
+        .container {
+            max-width: 500px;
+            margin: 0 auto;
+            background: white;
+            border-radius: 20px;
+            overflow: hidden;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.2);
+        }
+
+        .header {
+            background: linear-gradient(135deg, #4CAF50 0%, #45a049 100%);
+            color: white;
+            padding: 20px;
+            text-align: center;
+        }
+
+        .success-icon {
+            width: 60px;
+            height: 60px;
+            background: white;
+            border-radius: 50%;
+            margin: 0 auto 15px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 30px;
+            color: #4CAF50;
+        }
+
+        .order-status {
+            font-size: 24px;
+            font-weight: bold;
+            margin-bottom: 5px;
+        }
+
+        .delivery-time {
+            font-size: 14px;
+            opacity: 0.9;
+        }
+
+        .content {
+            padding: 20px;
+        }
+
+        .trip-info {
+            margin-bottom: 20px;
+        }
+
+        .order-id {
+            color: #888;
+            font-size: 14px;
+            margin-bottom: 10px;
+        }
+
+        .driver-info {
+            display: flex;
+            align-items: center;
+            margin-bottom: 20px;
+            padding: 15px;
+            background: #f8f9fa;
+            border-radius: 10px;
+        }
+
+        .driver-avatar {
+            width: 50px;
+            height: 50px;
+            background: #EC4D4A;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: white;
+            font-weight: bold;
+            font-size: 18px;
+            margin-right: 15px;
+        }
+
+        .driver-details h3 {
+            font-size: 16px;
+            color: #333;
+            margin-bottom: 2px;
+        }
+
+        .driver-details p {
+            font-size: 14px;
+            color: #666;
+        }
+
+        .addresses {
+            margin-bottom: 20px;
+        }
+
+        .address-item {
+            display: flex;
+            margin-bottom: 15px;
+        }
+
+        .address-icon {
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            margin-right: 15px;
+            margin-top: 8px;
+            flex-shrink: 0;
+        }
+
+        .pickup { background: #4CAF50; }
+        .dropoff { background: #EC4D4A; }
+
+        .address-details h4 {
+            font-size: 14px;
+            font-weight: 600;
+            color: #333;
+            margin-bottom: 2px;
+        }
+
+        .address-details p {
+            font-size: 12px;
+            color: #666;
+            line-height: 1.4;
+        }
+
+        .map-container {
+            height: 200px;
+            margin-bottom: 20px;
+            border-radius: 10px;
+            overflow: hidden;
+        }
+
+        .trip-status {
+            text-align: center;
+            padding: 15px;
+            background: #f8f9fa;
+            border-radius: 10px;
+            margin-bottom: 20px;
+        }
+
+        .status-text {
+            font-size: 16px;
+            font-weight: 600;
+            color: #333;
+        }
+
+        .distance-info {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 15px;
+            background: #f8f9fa;
+            border-radius: 10px;
+            margin-bottom: 20px;
+        }
+
+        .distance-item {
+            text-align: center;
+        }
+
+        .distance-label {
+            font-size: 12px;
+            color: #666;
+            margin-bottom: 5px;
+        }
+
+        .distance-value {
+            font-size: 16px;
+            font-weight: bold;
+            color: #333;
+        }
+
+        .footer {
+            text-align: center;
+            padding: 20px;
+            background: #2c3e50;
+            color: white;
+            font-size: 14px;
+        }
+
+        .loading {
+            text-align: center;
+            padding: 40px;
+            color: #666;
+        }
+
+        .error {
+            text-align: center;
+            padding: 40px;
+            color: #e74c3c;
+        }
+
+        .refresh-btn {
+            background: #4CAF50;
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 5px;
+            cursor: pointer;
+            margin-top: 10px;
+        }
+
+        .live-indicator {
+            display: inline-block;
+            width: 8px;
+            height: 8px;
+            background: #4CAF50;
+            border-radius: 50%;
+            animation: pulse 1s infinite;
+            margin-right: 5px;
+        }
+
+        @keyframes pulse {
+            0% { opacity: 1; }
+            50% { opacity: 0.5; }
+            100% { opacity: 1; }
+        }
+
+        .driver-marker {
+            background: white;
+            border: 2px solid #4CAF50;
+            border-radius: 50%;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.3);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 16px;
+        }
+
+        @media (max-width: 480px) {
+            .container {
+                margin: 0;
+                border-radius: 0;
+                min-height: 100vh;
+            }
+            
+            body {
+                padding: 0;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div id="loading" class="loading">
+            <div>🚚</div>
+            <h3>Loading trip details...</h3>
+        </div>
+
+        <div id="error" class="error" style="display: none;">
+            <div>❌</div>
+            <h3>Trip not found</h3>
+            <p>The tracking link may have expired or is invalid.</p>
+            <button class="refresh-btn" onclick="window.location.reload()">Try Again</button>
+        </div>
+
+        <div id="content" style="display: none;">
+            <div class="header">
+                <div class="success-icon">✓</div>
+                <div class="order-status" id="orderStatus">Order In Progress</div>
+                <div class="delivery-time" id="deliveryTime">Live tracking active</div>
+            </div>
+
+            <div class="content">
+                <div class="trip-info">
+                    <div class="order-id" id="orderId">ORDER NO. #CRN45320096170W</div>
+                    
+                    <div class="driver-info">
+                        <div class="driver-avatar" id="driverAvatar">D</div>
+                        <div class="driver-details">
+                            <h3 id="driverName">Loading...</h3>
+                            <p id="vehicleInfo">Loading vehicle info...</p>
+                        </div>
+                    </div>
+
+                    <div class="trip-status">
+                        <span class="live-indicator"></span>
+                        <span class="status-text" id="statusText">Tracking live location...</span>
+                    </div>
+
+                    <div class="addresses" id="addresses">
+                        <!-- Addresses will be populated here -->
+                    </div>
+
+                    <div class="map-container">
+                        <div id="map"></div>
+                    </div>
+
+                    <div class="distance-info">
+                        <div class="distance-item">
+                            <div class="distance-label">Trip Distance</div>
+                            <div class="distance-value" id="tripDistance">0 KM</div>
+                        </div>
+                        <div class="distance-item">
+                            <div class="distance-label">Payment</div>
+                            <div class="distance-value" id="paymentAmount">₹0</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="footer">
+                Thank you for choosing <strong>RIDODROP</strong>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let map;
+        let driverMarker;
+        let routeControl;
+        let socket;
+        let shareToken;
+
+        // Get share token from URL
+        function getShareToken() {
+            const pathParts = window.location.pathname.split('/');
+            return pathParts[pathParts.length - 1];
+        }
+
+        // Initialize the tracking page
+        async function initializeTracking() {
+            shareToken = getShareToken();
+            
+            if (!shareToken || shareToken === 'track-trip') {
+                showError();
+                return;
+            }
+
+            try {
+                // Load trip details
+                await loadTripDetails();
+                
+                // Initialize map
+                initializeMap();
+                
+                // Connect to WebSocket for real-time updates
+                connectWebSocket();
+                
+            } catch (error) {
+                console.error('Error initializing tracking:', error);
+                showError();
+            }
+        }
+
+        // Load trip details from API
+        async function loadTripDetails() {
+            const response = await fetch(`/api/v1/trip-sharing/track-trip/${shareToken}`);
+            const result = await response.json();
+
+            if (!result.success) {
+                throw new Error(result.message);
+            }
+
+            const trip = result.trip;
+            
+            // Update UI with trip details
+            document.getElementById('orderId').textContent = `ORDER NO. #${trip.orderId}`;
+            
+            // Driver info
+            if (trip.rider) {
+                document.getElementById('driverName').textContent = trip.rider.name || 'Driver';
+                document.getElementById('vehicleInfo').textContent = 
+                    `${trip.rider.vehicleType || trip.vehicleType} | ${trip.rider.vehicleNumber || 'N/A'}`;
+                document.getElementById('driverAvatar').textContent = 
+                    (trip.rider.name || 'D').charAt(0).toUpperCase();
+            }
+
+            // Status
+            const statusMap = {
+                'pending': 'Order Placed',
+                'accepted': 'Driver Assigned',
+                'in_progress': 'On the Way',
+                'completed': 'Delivered Successfully'
+            };
+            
+            document.getElementById('orderStatus').textContent = 
+                statusMap[trip.status] || 'Order In Progress';
+            
+            document.getElementById('statusText').textContent = 
+                trip.status === 'completed' ? 'Trip Completed' : 'Tracking live location...';
+
+            // Addresses
+            const addressesContainer = document.getElementById('addresses');
+            addressesContainer.innerHTML = '';
+
+            if (trip.fromAddress) {
+                addressesContainer.innerHTML += `
+                    <div class="address-item">
+                        <div class="address-icon pickup"></div>
+                        <div class="address-details">
+                            <h4>${trip.fromAddress.receiverName || 'Pickup'}</h4>
+                            <p>${trip.fromAddress.address}</p>
+                        </div>
+                    </div>
+                `;
+            }
+
+            if (trip.dropLocation && trip.dropLocation.length > 0) {
+                trip.dropLocation.forEach(drop => {
+                    addressesContainer.innerHTML += `
+                        <div class="address-item">
+                            <div class="address-icon dropoff"></div>
+                            <div class="address-details">
+                                <h4>${drop.receiverName || 'Delivery'}</h4>
+                                <p>${drop.address}</p>
+                            </div>
+                        </div>
+                    `;
+                });
+            }
+
+            // Distance and payment
+            document.getElementById('tripDistance').textContent = 
+                trip.distanceKm ? `${trip.distanceKm} KM` : '0 KM';
+            document.getElementById('paymentAmount').textContent = 
+                `₹${trip.amount || 0}`;
+
+            // Show content
+            document.getElementById('loading').style.display = 'none';
+            document.getElementById('content').style.display = 'block';
+
+            return trip;
+        }
+
+        // Initialize map
+        function initializeMap() {
+            map = L.map('map').setView([12.9716, 77.5946], 13); // Default to Bangalore
+
+            L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+                attribution: '© OpenStreetMap contributors'
+            }).addTo(map);
+
+            // Add markers for pickup and drop locations
+            // This will be enhanced based on actual trip data
+        }
+
+        // Connect to WebSocket for real-time updates
+        function connectWebSocket() {
+            const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+            const wsUrl = `${wsProtocol}//${window.location.host}?role=trip_watcher&shareToken=${shareToken}`;
+            
+            socket = new WebSocket(wsUrl);
+            
+            socket.onopen = function() {
+                console.log('Connected to WebSocket for trip tracking');
+                updateConnectionStatus(true);
+            };
+            
+            socket.onmessage = function(event) {
+                try {
+                    const data = JSON.parse(event.data);
+                    console.log('WebSocket message received:', data);
+                    
+                    if (data.type === 'trip_location_update') {
+                        updateDriverLocation(data.location);
+                    } else if (data.type === 'connection_established') {
+                        console.log('Trip tracking connection established');
+                    }
+                } catch (error) {
+                    console.error('Error parsing WebSocket message:', error);
+                }
+            };
+            
+            socket.onclose = function() {
+                console.log('WebSocket connection closed');
+                updateConnectionStatus(false);
+                // Attempt to reconnect after 3 seconds
+                setTimeout(() => {
+                    if (!socket || socket.readyState === WebSocket.CLOSED) {
+                        connectWebSocket();
+                    }
+                }, 3000);
+            };
+            
+            socket.onerror = function(error) {
+                console.error('WebSocket error:', error);
+                updateConnectionStatus(false);
+            };
+        }
+        
+        // Update connection status indicator
+        function updateConnectionStatus(connected) {
+            const indicator = document.querySelector('.live-indicator');
+            const statusText = document.getElementById('statusText');
+            
+            if (connected) {
+                indicator.style.background = '#4CAF50';
+                statusText.textContent = 'Live tracking active';
+            } else {
+                indicator.style.background = '#FFA500';
+                statusText.textContent = 'Reconnecting...';
+            }
+        }
+
+        // Update driver location on map
+        function updateDriverLocation(locationData) {
+            const { latitude, longitude, timestamp } = locationData;
+
+            if (driverMarker) {
+                map.removeLayer(driverMarker);
+            }
+
+            // Add/update driver marker with custom icon
+            const driverIcon = L.divIcon({
+                className: 'driver-marker',
+                html: '🚚',
+                iconSize: [30, 30],
+                iconAnchor: [15, 15]
+            });
+
+            driverMarker = L.marker([latitude, longitude], { icon: driverIcon })
+                .addTo(map)
+                .bindPopup('Driver Current Location');
+
+            // Center map on driver location
+            map.setView([latitude, longitude], 15);
+
+            // Update last updated time
+            const updateTime = timestamp ? new Date(timestamp) : new Date();
+            document.getElementById('deliveryTime').textContent = 
+                `Last updated: ${updateTime.toLocaleTimeString()}`;
+            
+            // Update connection status to show live updates
+            updateConnectionStatus(true);
+        }
+
+        // Show error state
+        function showError() {
+            document.getElementById('loading').style.display = 'none';
+            document.getElementById('error').style.display = 'block';
+        }
+
+        // Initialize when page loads
+        document.addEventListener('DOMContentLoaded', initializeTracking);
+    </script>
+</body>
+</html>

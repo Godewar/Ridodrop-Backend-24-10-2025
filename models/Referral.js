@@ -41,11 +41,19 @@ const referralSchema = new mongoose.Schema(
       enum: ['customer', 'rider'],
       required: true
     },
+    
+    // Referral type: 'rider' for rider referrals (milestone-based), 'customer' for customer referrals (one-time)
+    referralType: {
+      type: String,
+      enum: ['rider', 'customer'],
+      required: true,
+      default: 'rider'
+    },
 
     // Referral Details
     vehicleType: {
       type: String,
-      enum: ['2W', '3W', 'Truck'],
+      enum: ['2W', '3W', 'Truck', null], // Allow null for customer referrals
       default: null
     },
     rewardAmount: {
@@ -77,6 +85,31 @@ const referralSchema = new mongoose.Schema(
       type: String,
       default: 'default'
     },
+
+    // Milestone tracking
+    totalRidesCompleted: {
+      type: Number,
+      default: 0
+    },
+    lastRideCompletedAt: {
+      type: Date,
+      default: null
+    },
+    activationDate: {
+      type: Date,
+      default: Date.now
+    },
+    milestonesCompleted: [
+      {
+        milestoneId: Number,
+        title: String,
+        rides: Number,
+        reward: Number,
+        completedAt: Date,
+        rewardCredited: Boolean,
+        transactionId: String
+      }
+    ],
 
     // Additional info
     notes: {

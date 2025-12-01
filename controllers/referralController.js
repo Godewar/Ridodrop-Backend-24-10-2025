@@ -515,3 +515,115 @@ exports.getCampaignById = async (req, res) => {
     });
   }
 };
+
+// Manual wallet credit by admin for milestone rewards
+exports.manualCreditMilestone = async (req, res) => {
+  try {
+    const { referralId, milestoneId, amount, adminNotes } = req.body;
+
+    if (!referralId || !milestoneId || !amount) {
+      return res.status(400).json({
+        success: false,
+        message: 'referralId, milestoneId, and amount are required'
+      });
+    }
+
+    // Find referral
+    const referral = await Referral.findById(referralId);
+    if (!referral) {
+      return res.status(404).json({
+        success: false,
+        message: 'Referral not found'
+      });
+    }
+
+    // Check if milestone already credited
+    const existingMilestone = referral.milestonesCompleted.find(m => m.milestoneId === milestoneId);
+    if (existingMilestone && existingMilestone.rewardCredited) {
+      return res.status(400).json({
+        success: false,
+        message: 'This milestone has already been credited'
+      });
+    }
+
+    // Find referrer (User or Rider)
+    const Rider = require('../models/RiderSchema');
+    const Transaction = require('../models/Transaction');
+    
+    let referrer = await User.findById(referral.referrerId);
+    if (!referrer) {
+      referrer = await Rider.findById(referral.referrerId);
+    }
+
+    if (!referrer) {
+      return res.status(404).json({
+        success: false,
+        message: 'Referrer not found'
+      });
+    }
+
+    // Credit wallet
+    referrer.walletBalance = (referrer.walletBalance || 0) + amount;
+    await referrer.save();
+
+    // Create transaction
+    const txn = await Transaction.create({
+      userId: referrer._id,
+      amount: amount,
+      type: 'credit',
+      description: `Manual Referral Reward Credit (Admin) - Milestone ${milestoneId}${adminNotes ? ': ' + adminNotes : ''}`
+    });
+
+    // Update referral record
+    if (existingMilestone) {
+      existingMilestone.rewardCredited = true;
+      existingMilestone.reward = amount;
+      existingMilestone.completedAt = new Date();
+      existingMilestone.transactionId = txn._id.toString();
+    } else {
+      referral.milestonesCompleted.push({
+        milestoneId: milestoneId,
+        title: `Milestone ${milestoneId}`,
+        rides: referral.totalRidesCompleted || 0,
+        reward: amount,
+        completedAt: new Date(),
+        rewardCredited: true,
+        transactionId: txn._id.toString()
+      });
+    }
+
+    if (adminNotes) {
+      referral.notes = (referral.notes || '') + `\n[${new Date().toISOString()}] Admin credited ₹${amount} for milestone ${milestoneId}: ${adminNotes}`;
+    }
+
+    await referral.save();
+
+    console.log('✅ Manual milestone credit by admin:');
+    console.log('   Referral ID:', referralId);
+    console.log('   Milestone:', milestoneId);
+    console.log('   Amount: ₹', amount);
+    console.log('   Referrer:', referrer.name, '(' + referrer.phone + ')');
+    console.log('   New Balance: ₹', referrer.walletBalance);
+
+    res.status(200).json({
+      success: true,
+      message: 'Milestone reward credited successfully',
+      data: {
+        referralId: referral._id,
+        milestoneId: milestoneId,
+        amount: amount,
+        referrerName: referrer.name,
+        referrerPhone: referrer.phone,
+        newWalletBalance: referrer.walletBalance,
+        transactionId: txn._id
+      }
+    });
+  } catch (error) {
+    console.error('Error in manualCreditMilestone:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error crediting milestone reward',
+      error: error.message
+    });
+  }
+};

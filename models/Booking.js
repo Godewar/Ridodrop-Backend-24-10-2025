@@ -23,6 +23,23 @@ const bookingSchema = new mongoose.Schema(
     payFrom: {
       type: String
     },
+    // Payment tracking fields for online payments
+    paymentMethod: {
+      type: String,
+      enum: ['cash', 'online', 'wallet'],
+      default: 'cash'
+    },
+    paymentStatus: {
+      type: String,
+      enum: ['pending', 'completed', 'failed', 'refunded'],
+      default: 'pending'
+    },
+    transactionId: {
+      type: String
+    },
+    paymentCompletedAt: {
+      type: Date
+    },
     userId: {
       type: String,
       required: true
@@ -38,7 +55,9 @@ const bookingSchema = new mongoose.Schema(
       enum: ['2W', '3W', 'Truck']
       // required: true,
     },
-    productImages: [{ type: String }],
+    productImages: [{ type: String }], // Keep for backward compatibility
+    pickupImages: [{ type: String }],   // Images from pickup location
+    dropImages: [{ type: String }],     // Images from drop location
     status: {
       type: String,
       enum: ['pending', 'accepted', 'in_progress', 'completed', 'cancelled'],
@@ -49,7 +68,7 @@ const bookingSchema = new mongoose.Schema(
     },
     cancelledBy: {
       type: String,
-      enum: ['customer', 'driver', 'admin']
+      enum: ['customer', 'driver', 'admin', 'system']
     },
     cancelledAt: {
       type: Date
@@ -90,6 +109,16 @@ const bookingSchema = new mongoose.Schema(
       type: String,
       default: 0
     },
+    currentDropIndex: {
+      type: Number,
+      default: 0,
+      min: 0
+    },
+    tripState: {
+      type: String,
+      enum: ['pending', 'at_pickup', 'en_route_to_drop', 'at_drop', 'completed'],
+      default: 'pending'
+    },
     distanceKm: { type: String },
     cashCollected: { type: Boolean, default: false },
     // Track riders who declined this booking
@@ -116,6 +145,77 @@ const bookingSchema = new mongoose.Schema(
     totalDriverEarnings: { 
       type: Number, 
       default: 0 
+    },
+    
+    // Fee breakdown fields
+    feeBreakdown: {
+      // Platform fee calculation
+      platformFeePercentage: { type: Number, default: 0 },
+      platformFee: { type: Number, default: 0 },
+      gstPercentage: { type: Number, default: 0 },
+      gstAmount: { type: Number, default: 0 },
+      riderEarnings: { type: Number, default: 0 },
+      
+      // Customer display breakdown
+      baseFare: { type: Number, default: 0 },
+      distanceCharge: { type: Number, default: 0 },
+      serviceTax: { type: Number, default: 0 },
+      discount: { type: Number, default: 0 },
+      finalAmount: { type: Number, default: 0 },
+      
+      // Metadata
+      calculatedAt: { type: Date },
+      settingsVersion: { type: String },
+      vehicleTypeUsed: { type: String }
+    },
+    
+    // Legacy fields for backward compatibility
+    baseFare: { type: String }, // Keep as string for old bookings
+    additionalCharges: { type: String }, // Keep as string for old bookings
+    
+    // Trip sharing fields
+    shareToken: {
+      type: String,
+      index: true
+    },
+    shareTokenCreatedAt: {
+      type: Date
+    },
+    currentLocation: {
+      latitude: { type: Number },
+      longitude: { type: Number },
+      timestamp: { type: Date }
+    },
+    // Review system fields
+    customerReview: {
+      rating: { type: Number, min: 1, max: 5 },
+      feedback: { type: String, maxlength: 500 },
+      reviewedAt: { type: Date },
+      reviewedBy: { type: String } // Customer ID who gave the review
+    },
+    riderReview: {
+      rating: { type: Number, min: 1, max: 5 },
+      feedback: { type: String, maxlength: 500 },
+      reviewedAt: { type: Date },
+      reviewedBy: { type: String } // Rider ID who gave the review
+    },
+    // Invoice system fields
+    invoiceNumber: {
+      type: String,
+      unique: true,
+      sparse: true // Allows null values to not be unique
+    },
+    invoiceUrl: {
+      type: String // Cloudinary URL for the invoice PDF
+    },
+    invoiceCloudinaryId: {
+      type: String // Cloudinary public_id for deletion if needed
+    },
+    invoiceGeneratedAt: {
+      type: Date
+    },
+    invoiceAmount: {
+      type: Number // Total amount on the invoice
     }
   },
   { timestamps: true }

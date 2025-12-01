@@ -3,8 +3,16 @@ const Transaction = require('../models/Transaction');
 
 exports.getBalance = async (req, res) => {
   try {
-    const user = await User.findById(req.user.userId);
-    res.json({ balance: user.walletBalance });
+    const user = await User.findById(req.user._id);
+    if (!user) return res.status(404).json({ message: 'User not found' });
+    
+    // Initialize walletBalance if it doesn't exist
+    if (user.walletBalance === null || user.walletBalance === undefined) {
+      user.walletBalance = 0;
+      await user.save();
+    }
+    
+    res.json({ balance: user.walletBalance || 0 });
   } catch (err) {
     res.status(500).json({ message: 'Server error', error: err.message });
   }
@@ -14,10 +22,10 @@ exports.addMoney = async (req, res) => {
   try {
     const { amount } = req.body;
     if (!amount || amount <= 0) return res.status(400).json({ message: 'Invalid amount' });
-    const user = await User.findById(req.user.userId);
+    const user = await User.findById(req.user._id);
     user.walletBalance += amount;
     await user.save();
-    const transaction = new Transaction({ user: user._id, type: 'credit', amount, description: 'Wallet top-up' });
+    const transaction = new Transaction({ userId: user._id, type: 'credit', amount, description: 'Wallet top-up' });
     await transaction.save();
     res.json({ balance: user.walletBalance });
   } catch (err) {
@@ -27,7 +35,7 @@ exports.addMoney = async (req, res) => {
 
 exports.getTransactions = async (req, res) => {
   try {
-    const transactions = await Transaction.find({ user: req.user.userId }).sort({ createdAt: -1 });
+    const transactions = await Transaction.find({ userId: req.user._id }).sort({ createdAt: -1 });
     res.json(transactions);
   } catch (err) {
     res.status(500).json({ message: 'Server error', error: err.message });
